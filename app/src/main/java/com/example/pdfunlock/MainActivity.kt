@@ -1,53 +1,272 @@
+@file:OptIn(ExperimentalTextApi::class)
+
 package com.example.pdfunlock
 
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
-import android.text.InputType
-import android.view.ViewGroup
-import android.widget.Button
-import android.widget.EditText
-import android.widget.FrameLayout
-import android.widget.ImageView
-import android.widget.TextView
-import android.widget.Toast
+import android.util.LruCache
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.ExperimentalTextApi
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.lifecycleScope
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
 
+// ---- Artefact look: Candy accents, Plus Jakarta Sans, wallpaper + glass-style surfaces ----
+
+private val Sky = Color(0xFF0A84FF)       // Candy.Sky: the primary action
+private val Tomato = Color(0xFFFF5B4F)    // Candy.Tomato: errors
+private val InkLight = Color(0xFF172033)
+private val InkDark = Color(0xFFEEF1FF)
+
+private val Jakarta = FontFamily(
+    Font(R.font.jakarta, FontWeight.Normal, variationSettings = FontVariation.Settings(FontVariation.weight(400))),
+    Font(R.font.jakarta, FontWeight.SemiBold, variationSettings = FontVariation.Settings(FontVariation.weight(600))),
+    Font(R.font.jakarta, FontWeight.Bold, variationSettings = FontVariation.Settings(FontVariation.weight(700))),
+)
+
+private fun type(size: Int, weight: FontWeight) =
+    TextStyle(fontFamily = Jakarta, fontSize = size.sp, fontWeight = weight)
+
+private val Headline = type(32, FontWeight.Bold)
+private val Title = type(18, FontWeight.Bold)
+private val BodyStrong = type(15, FontWeight.SemiBold)
+private val Body = type(15, FontWeight.Normal)
+private val Caption = type(12, FontWeight.Normal)
+
+private class Palette(val dark: Boolean) {
+    val ink = if (dark) InkDark else InkLight
+    val inkSoft = ink.copy(alpha = 0.66f)
+    val line = ink.copy(alpha = 0.10f)
+    val glass = if (dark) Color(0xFFC9D2FF).copy(alpha = 0.11f) else Color.White.copy(alpha = 0.26f)
+    val rim = if (dark) Color.White.copy(alpha = 0.26f) else Color.White.copy(alpha = 0.70f)
+    val frost = if (dark) Color(0xFF1A1B3C).copy(alpha = 0.90f) else Color(0xFFF3F6FC).copy(alpha = 0.86f)
+    val wall = if (dark) listOf(Color(0xFF0A0B1E), Color(0xFF14123A), Color(0xFF0B1030))
+    else listOf(Color(0xFF9AB4DC), Color(0xFFB3C5E8), Color(0xFFA8BEE3))
+    val bloomA = if (dark) Color(0xFF1E6FD9).copy(alpha = 0.46f) else Color(0xFFCDF2F3).copy(alpha = 0.62f)
+    val bloomB = if (dark) Color(0xFF7C3AED).copy(alpha = 0.52f) else Color(0xFFD9C3F4).copy(alpha = 0.58f)
+}
+
+private fun Modifier.wallpaper(p: Palette): Modifier =
+    this.background(Brush.verticalGradient(p.wall)).drawBehind {
+        drawRect(
+            Brush.radialGradient(
+                listOf(p.bloomA, Color.Transparent),
+                center = Offset(size.width * 0.15f, size.height * 0.10f),
+                radius = size.width * 0.9f
+            )
+        )
+        drawRect(
+            Brush.radialGradient(
+                listOf(p.bloomB, Color.Transparent),
+                center = Offset(size.width * 0.90f, size.height * 0.80f),
+                radius = size.width * 0.9f
+            )
+        )
+    }
+
+@Composable
+private fun Modifier.pressScale(source: MutableInteractionSource): Modifier {
+    val pressed by source.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.94f else 1f,
+        animationSpec = spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMedium),
+        label = "press"
+    )
+    return this.graphicsLayer { scaleX = scale; scaleY = scale }
+}
+
+/** Capsule button. With [tint] it is the vivid blue action pill, without it a frosted one. */
+@Composable
+private fun Pill(
+    text: String,
+    p: Palette,
+    modifier: Modifier = Modifier,
+    tint: Color? = null,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    val source = remember { MutableInteractionSource() }
+    val haptic = LocalHapticFeedback.current
+    val shape = RoundedCornerShape(50)
+    Box(
+        modifier
+            .alpha(if (enabled) 1f else 0.4f)
+            .pressScale(source)
+            .clip(shape)
+            .background(tint ?: p.glass)
+            .border(1.dp, p.rim, shape)
+            .clickable(interactionSource = source, indication = null, enabled = enabled) {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                onClick()
+            }
+            .padding(horizontal = 14.dp, vertical = 13.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text,
+            color = if (tint != null) Color.White else p.ink,
+            style = BodyStrong,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun Text(
+    text: String,
+    color: Color,
+    style: TextStyle,
+    modifier: Modifier = Modifier,
+    textAlign: TextAlign? = null,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip
+) = androidx.compose.material3.Text(
+    text = text, color = color, style = style, modifier = modifier,
+    textAlign = textAlign, maxLines = maxLines, overflow = overflow
+)
+
+// ---- PDF pages (rendered from the unlocked copy) ----
+
+private class PdfPages(
+    private val pfd: ParcelFileDescriptor,
+    private val renderer: PdfRenderer,
+    private val widthPx: Int
+) {
+    val count: Int = renderer.pageCount
+    private val cache = LruCache<Int, Bitmap>(6)
+    private var closed = false
+
+    fun render(i: Int): Bitmap? = synchronized(this) {
+        if (closed) return@synchronized null
+        val hit = cache.get(i)
+        if (hit != null) return@synchronized hit
+        try {
+            renderer.openPage(i).use { page ->
+                val h = (widthPx.toFloat() * page.height / page.width).toInt().coerceAtLeast(1)
+                val b = Bitmap.createBitmap(widthPx, h, Bitmap.Config.ARGB_8888)
+                b.eraseColor(android.graphics.Color.WHITE)
+                page.render(b, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                cache.put(i, b)
+                b
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun close() = synchronized(this) {
+        closed = true
+        try { renderer.close() } catch (_: Exception) {}
+        try { pfd.close() } catch (_: Exception) {}
+    }
+}
+
 private enum class Outcome { OK, WRONG, ERROR }
+private enum class Phase { Empty, Loading, Locked, Ready, Failed }
 
-class MainActivity : AppCompatActivity() {
-
-    private lateinit var recycler: RecyclerView
-    private lateinit var status: TextView
-    private lateinit var btnSave: Button
+class MainActivity : ComponentActivity() {
 
     private var sourceUri: Uri? = null
     private var fingerprint: String? = null
-    private var displayName = "document.pdf"
-    private var renderer: PdfRenderer? = null
-    private var pfd: ParcelFileDescriptor? = null
     private var lastError: String? = null
     private val unlockedFile by lazy { File(cacheDir, "unlocked.pdf") }
+
+    private var docName by mutableStateOf<String?>(null)
+    private var phase by mutableStateOf(Phase.Empty)
+    private var pages by mutableStateOf<PdfPages?>(null)
+    private var askPassword by mutableStateOf(false)
+    private var passwordWrong by mutableStateOf(false)
+    private var prefill by mutableStateOf("")
+    private var hasSaved by mutableStateOf(false)
+    private var message by mutableStateOf<String?>(null)
 
     private val openLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -61,31 +280,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
+        enableEdgeToEdge()
         PDFBoxResourceLoader.init(applicationContext)
-
-        recycler = findViewById(R.id.recycler)
-        status = findViewById(R.id.status)
-        btnSave = findViewById(R.id.btnSave)
-        recycler.layoutManager = LinearLayoutManager(this)
-
-        findViewById<Button>(R.id.btnOpen).setOnClickListener {
-            openLauncher.launch(arrayOf("application/pdf"))
-        }
-        btnSave.isEnabled = false
-        btnSave.setOnClickListener {
-            saveLauncher.launch(displayName.substringBeforeLast('.') + "_unlocked.pdf")
-        }
-        findViewById<Button>(R.id.btnForget).setOnClickListener {
-            val fp = fingerprint
-            if (fp != null) {
-                PasswordStore.forget(this, fp)
-                toast("Saved password removed for this PDF")
-            } else {
-                toast("No PDF open")
-            }
-        }
-
+        setContent { Screen() }
         handleIntent(intent)
     }
 
@@ -94,6 +291,245 @@ class MainActivity : AppCompatActivity() {
         setIntent(intent)
         handleIntent(intent)
     }
+
+    // ---------------- UI ----------------
+
+    @Composable
+    private fun Screen() {
+        val p = remember(isSystemInDarkTheme()) { Palette(dark = isSystemInDarkTheme()) }
+        val density = LocalDensity.current
+        val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+        val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
+        BoxWithConstraints(Modifier.fillMaxSize().wallpaper(p)) {
+            val doc = pages
+            val pageWidthPx = with(density) { (maxWidth - 24.dp).roundToPx() }
+
+            if (doc != null && phase == Phase.Ready) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(top = topInset + 84.dp, bottom = bottomInset + 96.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(doc.count) { i -> PageView(doc, i) }
+                }
+            }
+
+            if (phase == Phase.Empty || phase == Phase.Loading || phase == Phase.Locked || phase == Phase.Failed) {
+                Column(
+                    Modifier.align(Alignment.Center).padding(horizontal = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    when (phase) {
+                        Phase.Loading -> {
+                            CircularProgressIndicator(color = Sky)
+                            Spacer(Modifier.height(16.dp))
+                            Text("Unlocking…", p.inkSoft, Body)
+                        }
+                        Phase.Locked -> {
+                            Text("This PDF is locked", p.ink, Headline.copy(fontSize = 26.sp), textAlign = TextAlign.Center)
+                            Spacer(Modifier.height(18.dp))
+                            Pill("Enter password", p, tint = Sky) { passwordWrong = false; askPassword = true }
+                        }
+                        Phase.Failed -> {
+                            Text("Couldn’t open this PDF", p.ink, Headline.copy(fontSize = 26.sp), textAlign = TextAlign.Center)
+                            Spacer(Modifier.height(18.dp))
+                            Pill("Open another PDF", p, tint = Sky) { openLauncher.launch(arrayOf("application/pdf")) }
+                        }
+                        else -> {
+                            Text("PDF Unlock", p.ink, Headline)
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                "Open a password-protected PDF, unlock it and save a copy that opens without the password.",
+                                p.inkSoft, Body, textAlign = TextAlign.Center
+                            )
+                            Spacer(Modifier.height(22.dp))
+                            Pill("Open PDF", p, tint = Sky) { openLauncher.launch(arrayOf("application/pdf")) }
+                        }
+                    }
+                }
+            }
+
+            if (phase != Phase.Empty) {
+                // floating top bar
+                Column(
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = topInset + 8.dp, start = 12.dp, end = 12.dp)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(26.dp))
+                        .background(p.frost)
+                        .border(1.dp, p.rim, RoundedCornerShape(26.dp))
+                        .padding(horizontal = 18.dp, vertical = 12.dp)
+                ) {
+                    Text(docName ?: "PDF", p.ink, Title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val sub = when (phase) {
+                        Phase.Ready -> "Unlocked · ${pages?.count ?: 0} pages"
+                        Phase.Loading -> "Unlocking…"
+                        Phase.Locked -> "Locked"
+                        else -> "Couldn’t open"
+                    }
+                    Text(sub, p.inkSoft, Caption)
+                }
+
+                // floating bottom bar
+                Row(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = bottomInset + 10.dp, start = 12.dp, end = 12.dp)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(30.dp))
+                        .background(p.frost)
+                        .border(1.dp, p.rim, RoundedCornerShape(30.dp))
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Pill("Open", p, Modifier.weight(1f)) { openLauncher.launch(arrayOf("application/pdf")) }
+                    if (hasSaved) {
+                        Pill("Forget password", p, Modifier.weight(1.5f)) { forgetPassword() }
+                    }
+                    Pill(
+                        "Save unlocked", p, Modifier.weight(1.5f),
+                        tint = Sky, enabled = phase == Phase.Ready
+                    ) {
+                        saveLauncher.launch((docName ?: "document.pdf").substringBeforeLast('.') + "_unlocked.pdf")
+                    }
+                }
+            }
+
+            // short message
+            val msg = message
+            if (msg != null) {
+                LaunchedEffect(msg) { delay(2500); message = null }
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = bottomInset + 96.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(p.frost)
+                        .border(1.dp, p.rim, RoundedCornerShape(50))
+                        .padding(horizontal = 18.dp, vertical = 11.dp)
+                ) { Text(msg, p.ink, BodyStrong) }
+            }
+
+            if (askPassword) {
+                PasswordDialog(
+                    p = p,
+                    name = docName ?: "PDF",
+                    wrong = passwordWrong,
+                    initial = prefill,
+                    onCancel = { askPassword = false; phase = Phase.Locked },
+                    onUnlock = { pw -> askPassword = false; tryUnlock(pw, fromUser = true) }
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun PageView(doc: PdfPages, index: Int) {
+        val bmp by produceState<Bitmap?>(null, doc, index) {
+            value = withContext(Dispatchers.Default) { doc.render(index) }
+        }
+        Box(
+            Modifier
+                .padding(horizontal = 12.dp)
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color.White)
+                .then(if (bmp == null) Modifier.aspectRatio(0.707f) else Modifier)
+        ) {
+            bmp?.let {
+                Image(
+                    bitmap = it.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentScale = ContentScale.FillWidth
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun PasswordDialog(
+        p: Palette,
+        name: String,
+        wrong: Boolean,
+        initial: String,
+        onCancel: () -> Unit,
+        onUnlock: (String) -> Unit
+    ) {
+        var pw by remember { mutableStateOf(initial) }
+        var show by remember { mutableStateOf(false) }
+        val focus = remember { FocusRequester() }
+        LaunchedEffect(Unit) { focus.requestFocus() }
+        val shape = RoundedCornerShape(30.dp)
+
+        Dialog(
+            onDismissRequest = {},
+            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)
+        ) {
+            Column(
+                Modifier
+                    .padding(24.dp)
+                    .fillMaxWidth()
+                    .clip(shape)
+                    .background(p.frost.copy(alpha = 0.97f))
+                    .border(1.dp, p.rim, shape)
+                    .padding(22.dp)
+            ) {
+                Text("Enter password", p.ink, Title)
+                Spacer(Modifier.height(4.dp))
+                Text(name, p.inkSoft, Caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(16.dp))
+
+                val fieldShape = RoundedCornerShape(18.dp)
+                BasicTextField(
+                    value = pw,
+                    onValueChange = { pw = it },
+                    singleLine = true,
+                    textStyle = Body.copy(color = p.ink),
+                    cursorBrush = SolidColor(Sky),
+                    visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { onUnlock(pw) }),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                    decorationBox = { inner ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(fieldShape)
+                                .background(p.ink.copy(alpha = 0.07f))
+                                .border(1.dp, if (wrong) Tomato else p.line, fieldShape)
+                                .padding(start = 16.dp, end = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(Modifier.weight(1f).padding(vertical = 15.dp)) {
+                                if (pw.isEmpty()) Text("Password", p.inkSoft, Body)
+                                inner()
+                            }
+                            Box(
+                                Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .clickable { show = !show }
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                            ) { Text(if (show) "Hide" else "Show", Sky, BodyStrong) }
+                        }
+                    }
+                )
+                if (wrong) {
+                    Spacer(Modifier.height(8.dp))
+                    Text("The password is incorrect.", Tomato, Caption)
+                }
+                Spacer(Modifier.height(20.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Pill("Cancel", p, Modifier.weight(1f)) { onCancel() }
+                    Pill("Unlock", p, Modifier.weight(1f), tint = Sky) { onUnlock(pw) }
+                }
+            }
+        }
+    }
+
+    // ---------------- Logic ----------------
 
     private fun handleIntent(intent: Intent?) {
         val uri: Uri? = when (intent?.action) {
@@ -110,21 +546,24 @@ class MainActivity : AppCompatActivity() {
 
     private fun openPdf(uri: Uri) {
         sourceUri = uri
-        displayName = queryName(uri) ?: "document.pdf"
-        status.text = displayName
-        closeRenderer()
-        btnSave.isEnabled = false
+        docName = queryName(uri) ?: "document.pdf"
+        pages?.close()
+        pages = null
+        askPassword = false
+        phase = Phase.Loading
         lifecycleScope.launch {
             val fp = withContext(Dispatchers.IO) { fingerprintOf(uri) }
             fingerprint = fp
             val saved = fp?.let { PasswordStore.get(this@MainActivity, it) }
-            // Saved password is tried automatically; otherwise try empty password (unprotected PDFs)
+            hasSaved = saved != null || PasswordStore.getLast(this@MainActivity) != null
+            // Saved password is tried automatically; otherwise an empty one (unprotected PDFs)
             tryUnlock(saved ?: "", fromUser = false)
         }
     }
 
     private fun tryUnlock(password: String, fromUser: Boolean) {
         val uri = sourceUri ?: return
+        phase = Phase.Loading
         lifecycleScope.launch {
             val outcome = withContext(Dispatchers.IO) {
                 try {
@@ -146,75 +585,63 @@ class MainActivity : AppCompatActivity() {
                 Outcome.OK -> {
                     if (fromUser && password.isNotEmpty()) {
                         fingerprint?.let { PasswordStore.save(this@MainActivity, it, password) }
+                        PasswordStore.saveLast(this@MainActivity, password)
+                        hasSaved = true
                     }
                     showPages()
                 }
                 Outcome.WRONG -> {
-                    if (!fromUser) fingerprint?.let { PasswordStore.forget(this@MainActivity, it) }
-                    askPassword(showError = fromUser)
+                    if (!fromUser) {
+                        // this PDF's saved password no longer works
+                        fingerprint?.let { PasswordStore.forget(this@MainActivity, it) }
+                    }
+                    val last = PasswordStore.getLast(this@MainActivity)
+                    hasSaved = last != null
+                    // First ask: pre-fill the password used for the previous PDF
+                    prefill = if (fromUser) "" else (last ?: "")
+                    phase = Phase.Locked
+                    passwordWrong = fromUser
+                    askPassword = true
                 }
                 Outcome.ERROR -> {
-                    status.text = "Could not open PDF"
-                    toast("Error: ${lastError ?: "unknown"}")
+                    phase = Phase.Failed
+                    message = "Error: ${lastError ?: "unknown"}"
                 }
             }
         }
     }
 
-    private fun askPassword(showError: Boolean) {
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            hint = "Password"
-        }
-        val pad = (24 * resources.displayMetrics.density).toInt()
-        val box = FrameLayout(this).apply {
-            setPadding(pad, pad / 2, pad, 0)
-            addView(input)
-        }
-        AlertDialog.Builder(this)
-            .setTitle(if (showError) "Wrong password, try again" else "Enter PDF password")
-            .setView(box)
-            .setCancelable(false)
-            .setPositiveButton("Unlock") { _, _ -> tryUnlock(input.text.toString(), fromUser = true) }
-            .setNegativeButton("Cancel") { _, _ -> status.text = "$displayName (locked)" }
-            .show()
-    }
-
     private fun showPages() {
-        closeRenderer()
         try {
             val p = ParcelFileDescriptor.open(unlockedFile, ParcelFileDescriptor.MODE_READ_ONLY)
             val r = PdfRenderer(p)
-            pfd = p
-            renderer = r
-            recycler.adapter = PageAdapter(r, resources.displayMetrics.widthPixels, lifecycleScope)
-            btnSave.isEnabled = true
-            status.text = "$displayName  •  unlocked  •  ${r.pageCount} pages"
+            pages = PdfPages(p, r, resources.displayMetrics.widthPixels)
+            phase = Phase.Ready
         } catch (e: Exception) {
-            status.text = "Could not display PDF"
-            toast("Error: ${e.message}")
+            phase = Phase.Failed
+            message = "Error: ${e.message}"
         }
+    }
+
+    private fun forgetPassword() {
+        fingerprint?.let { PasswordStore.forget(this, it) }
+        PasswordStore.forgetLast(this)
+        hasSaved = false
+        message = "Saved passwords removed"
     }
 
     private fun saveTo(uri: Uri) {
         lifecycleScope.launch(Dispatchers.IO) {
-            try {
+            val result = try {
                 contentResolver.openOutputStream(uri)!!.use { out ->
                     unlockedFile.inputStream().use { it.copyTo(out) }
                 }
-                toast("Saved")
+                "Saved"
             } catch (e: Exception) {
-                toast("Save failed: ${e.message}")
+                "Save failed: ${e.message}"
             }
+            withContext(Dispatchers.Main) { message = result }
         }
-    }
-
-    private fun closeRenderer() {
-        recycler.adapter = null
-        try { renderer?.close() } catch (_: Exception) {}
-        try { pfd?.close() } catch (_: Exception) {}
-        renderer = null
-        pfd = null
     }
 
     private fun queryName(uri: Uri): String? = try {
@@ -248,60 +675,9 @@ class MainActivity : AppCompatActivity() {
         md.digest().joinToString("") { "%02x".format(it) }
     } catch (_: Exception) { null }
 
-    private fun toast(msg: String) {
-        runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
-    }
-
     override fun onDestroy() {
-        closeRenderer()
+        pages?.close()
         unlockedFile.delete()
         super.onDestroy()
-    }
-}
-
-private class PageAdapter(
-    private val r: PdfRenderer,
-    private val width: Int,
-    private val scope: CoroutineScope
-) : RecyclerView.Adapter<PageAdapter.VH>() {
-
-    class VH(val img: ImageView) : RecyclerView.ViewHolder(img)
-
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-        val iv = ImageView(parent.context).apply {
-            layoutParams = RecyclerView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = (8 * resources.displayMetrics.density).toInt() }
-            adjustViewBounds = true
-            setBackgroundColor(Color.WHITE)
-        }
-        return VH(iv)
-    }
-
-    override fun getItemCount() = r.pageCount
-
-    override fun onBindViewHolder(holder: VH, position: Int) {
-        holder.img.setImageBitmap(null)
-        holder.img.minimumHeight = (width * 1.41f).toInt()
-        scope.launch(Dispatchers.Default) {
-            val bmp = try {
-                synchronized(r) {
-                    r.openPage(position).use { page ->
-                        val h = (width.toFloat() * page.height / page.width).toInt()
-                        val b = Bitmap.createBitmap(width, h, Bitmap.Config.ARGB_8888)
-                        b.eraseColor(Color.WHITE)
-                        page.render(b, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                        b
-                    }
-                }
-            } catch (_: Exception) { null }
-            withContext(Dispatchers.Main) {
-                if (bmp != null && holder.bindingAdapterPosition == position) {
-                    holder.img.minimumHeight = 0
-                    holder.img.setImageBitmap(bmp)
-                }
-            }
-        }
     }
 }

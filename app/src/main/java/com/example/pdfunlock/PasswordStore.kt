@@ -60,4 +60,13 @@ object PasswordStore {
     fun forget(ctx: Context, id: String) {
         prefs(ctx).edit().remove(id).apply()
     }
+
+    // The password used most recently for any PDF (many PDFs often share one password)
+    private const val LAST_ID = "last_used_password"
+
+    fun saveLast(ctx: Context, password: String) = save(ctx, LAST_ID, password)
+
+    fun getLast(ctx: Context): String? = get(ctx, LAST_ID)
+
+    fun forgetLast(ctx: Context) = forget(ctx, LAST_ID)
 }
