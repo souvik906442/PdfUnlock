@@ -296,7 +296,8 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun Screen() {
-        val p = remember(isSystemInDarkTheme()) { Palette(dark = isSystemInDarkTheme()) }
+        val dark = isSystemInDarkTheme()
+        val p = remember(dark) { Palette(dark) }
         val density = LocalDensity.current
         val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
         val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
