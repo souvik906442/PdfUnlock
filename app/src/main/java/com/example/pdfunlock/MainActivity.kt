@@ -11,6 +11,8 @@ import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import android.util.LruCache
+import android.webkit.MimeTypeMap
+import androidx.core.content.FileProvider
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -426,6 +428,7 @@ class MainActivity : ComponentActivity() {
                             saveLauncher.launch((docName ?: "document.pdf").substringBeforeLast('.') + "_unlocked.pdf")
                         }
                     }
+                    Pill("Share", p, Modifier.weight(1f), enabled = phase == Phase.Ready) { shareFile() }
                 }
             }
 
@@ -717,6 +720,46 @@ class MainActivity : ComponentActivity() {
         message = "Saved passwords removed"
     }
 
+    /** Sends the open file (the unlocked copy for a PDF) to any app: WhatsApp, Gmail, Drive, Bluetooth... */
+    private fun shareFile() {
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val dir = File(cacheDir, "share").apply { mkdirs() }
+                    dir.listFiles()?.forEach { it.delete() }
+                    val base = docName ?: "document"
+                    val outName =
+                        if (kind == Kind.Pdf) base.substringBeforeLast('.') + "_unlocked.pdf" else base
+                    val f = File(dir, outName.replace(Regex("[\\\\/:*?\"<>|]"), "_"))
+                    if (kind == Kind.Pdf) {
+                        unlockedFile.copyTo(f, overwrite = true)
+                    } else {
+                        contentResolver.openInputStream(sourceUri!!)!!.use { input ->
+                            f.outputStream().use { input.copyTo(it) }
+                        }
+                    }
+                    f
+                }
+            }
+            result.onSuccess { f ->
+                val ext = f.name.substringAfterLast('.', "").lowercase()
+                val mime = if (kind == Kind.Pdf) "application/pdf"
+                else MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+                val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", f)
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = mime
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                try {
+                    startActivity(Intent.createChooser(send, "Share"))
+                } catch (e: Exception) {
+                    message = "No app to share with"
+                }
+            }.onFailure { message = "Share failed: ${it.message}" }
+        }
+    }
+
     private fun saveTo(uri: Uri) {
         lifecycleScope.launch(Dispatchers.IO) {
             val result = try {
@@ -765,6 +808,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         pages?.close()
         unlockedFile.delete()
+        File(cacheDir, "share").listFiles()?.forEach { it.delete() }
         super.onDestroy()
     }
 }
