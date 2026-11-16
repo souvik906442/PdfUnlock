@@ -6,6 +6,9 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.getValue
@@ -184,6 +187,131 @@ internal fun TextViewer(
             }
         }
     }
+}
+
+/** Spreadsheet viewer: sheet tabs at the bottom, a scrollable grid; tap a cell to copy it, long-press to copy its row. */
+@Composable
+internal fun SheetViewer(
+    sheets: List<Office.Sheet>,
+    p: Palette,
+    pad: PaddingValues,
+    onCopied: (String) -> Unit
+) {
+    if (sheets.isEmpty()) {
+        Box(Modifier.fillMaxSize().padding(pad), contentAlignment = Alignment.Center) {
+            Text("No sheets found in this file", color = PaperInk.copy(alpha = 0.7f), fontSize = 14.sp)
+        }
+        return
+    }
+    var idx by remember(sheets) { mutableStateOf(0) }
+    val sheet = sheets[idx.coerceIn(0, sheets.size - 1)]
+    val rows = sheet.rows
+    val clipboard = LocalClipboardManager.current
+    val hScroll = rememberScrollState()
+
+    val cols = remember(sheet) { rows.maxOfOrNull { it.size } ?: 0 }
+    val widths = remember(sheet) {
+        List(cols) { c ->
+            var longest = 3
+            for (r in 0 until minOf(rows.size, 300)) {
+                val len = rows[r].getOrNull(c)?.length ?: 0
+                if (len > longest) longest = len
+            }
+            (minOf(longest, 36) * 8 + 18).dp
+        }
+    }
+    val numW = 44.dp
+    val rowH = 30.dp
+    val total = widths.fold(numW + 24.dp) { acc, w -> acc + w }
+    val listPad = PaddingValues(top = pad.calculateTopPadding(), bottom = pad.calculateBottomPadding() + 84.dp)
+
+    Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().horizontalScroll(hScroll)) {
+            LazyColumn(Modifier.width(total).fillMaxHeight(), contentPadding = listPad) {
+                item {
+                    Row(Modifier.padding(start = 12.dp).background(Color(0xFFE6EBF3))) {
+                        Box(Modifier.width(numW).height(rowH))
+                        for (c in 0 until cols) {
+                            Box(Modifier.width(widths[c]).height(rowH).border(0.5.dp, GridLine), contentAlignment = Alignment.Center) {
+                                Text(colName(c), color = PaperInk.copy(alpha = 0.6f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+                items(rows.size) { r ->
+                    val row = rows[r]
+                    Row(Modifier.padding(start = 12.dp).background(Color.White)) {
+                        Box(Modifier.width(numW).height(rowH).background(Color(0xFFF1F4F8)).border(0.5.dp, GridLine), contentAlignment = Alignment.Center) {
+                            Text((r + 1).toString(), color = PaperInk.copy(alpha = 0.45f), fontSize = 10.sp)
+                        }
+                        for (c in 0 until cols) {
+                            val text = row.getOrNull(c) ?: ""
+                            Box(
+                                Modifier
+                                    .width(widths[c])
+                                    .height(rowH)
+                                    .border(0.5.dp, GridLine)
+                                    .combinedClickable(
+                                        onClick = {
+                                            if (text.isNotEmpty()) {
+                                                clipboard.setText(AnnotatedString(text))
+                                                onCopied("Cell copied")
+                                            }
+                                        },
+                                        onLongClick = {
+                                            clipboard.setText(AnnotatedString(row.joinToString("\t")))
+                                            onCopied("Row ${r + 1} copied")
+                                        }
+                                    )
+                                    .padding(horizontal = 6.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                Text(text, color = PaperInk, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+                if (sheet.truncated) {
+                    item {
+                        Text(
+                            "Only the first ${Office.MAX_ROWS} rows / ${Office.MAX_COLS} columns are shown",
+                            color = PaperInk.copy(alpha = 0.7f), fontSize = 12.sp,
+                            modifier = Modifier.padding(start = 24.dp, top = 10.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        val barShape = RoundedCornerShape(26.dp)
+        Box(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = pad.calculateBottomPadding(), start = 12.dp, end = 12.dp)
+                .fillMaxWidth()
+                .clip(barShape)
+                .background(p.frost)
+                .border(1.dp, p.rim, barShape)
+                .padding(8.dp)
+        ) {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                sheets.forEachIndexed { i, s ->
+                    Pill(s.name.ifBlank { "Sheet ${i + 1}" }, p, tint = if (i == idx) Sky else null) { idx = i }
+                }
+            }
+        }
+    }
+}
+
+private fun colName(c: Int): String {
+    var n = c + 1
+    val sb = StringBuilder()
+    while (n > 0) {
+        val r = (n - 1) % 26
+        sb.insert(0, ('A' + r))
+        n = (n - 1) / 26
+    }
+    return sb.toString()
 }
 
 @Composable

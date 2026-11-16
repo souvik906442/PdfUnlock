@@ -268,6 +268,8 @@ class MainActivity : ComponentActivity() {
     private var kind by mutableStateOf(Kind.Pdf)
     private var textLines by mutableStateOf<List<String>?>(null)
     private var docBlocks by mutableStateOf<List<DocBlock>?>(null)
+    private var sheets by mutableStateOf<List<Office.Sheet>?>(null)
+    private var slideCount by mutableStateOf(0)
     private var hasSaved by mutableStateOf(false)
     private var message by mutableStateOf<String?>(null)
 
@@ -322,7 +324,8 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     Kind.Text -> TextViewer(textLines ?: emptyList(), p, contentPad) { message = it }
-                    Kind.Word -> WordViewer(docBlocks ?: emptyList(), contentPad)
+                    Kind.Word, Kind.Slides -> WordViewer(docBlocks ?: emptyList(), contentPad)
+                    Kind.Sheet -> SheetViewer(sheets ?: emptyList(), p, contentPad) { message = it }
                     else -> {}
                 }
             }
@@ -352,7 +355,7 @@ class MainActivity : ComponentActivity() {
                             Text("PDF Unlock", p.ink, Headline)
                             Spacer(Modifier.height(10.dp))
                             Text(
-                                "Unlock a password-protected PDF and save a copy without the password. Word (.docx) and text files open too.",
+                                "Unlock a password-protected PDF and save a copy without the password. Word, Excel, PowerPoint and text files open too.",
                                 p.inkSoft, Body, textAlign = TextAlign.Center
                             )
                             Spacer(Modifier.height(22.dp))
@@ -380,6 +383,8 @@ class MainActivity : ComponentActivity() {
                             Kind.Pdf -> "Unlocked · ${pages?.count ?: 0} pages"
                             Kind.Text -> "Text · ${textLines?.size ?: 0} lines · tap a line, or Words for exact text"
                             Kind.Word -> "Word document"
+                            Kind.Sheet -> "Excel · ${sheets?.size ?: 0} sheet(s) · tap a cell to copy, long-press for the row"
+                            Kind.Slides -> "PowerPoint · $slideCount slides · text only"
                             else -> ""
                         }
                         Phase.Loading -> "Unlocking…"
@@ -423,7 +428,7 @@ class MainActivity : ComponentActivity() {
                 Box(
                     Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = bottomInset + (if (kind == Kind.Text) 176.dp else 96.dp))
+                        .padding(bottom = bottomInset + (if (kind == Kind.Text || kind == Kind.Sheet) 176.dp else 96.dp))
                         .clip(RoundedCornerShape(50))
                         .background(p.frost)
                         .border(1.dp, p.rim, RoundedCornerShape(50))
@@ -573,6 +578,8 @@ class MainActivity : ComponentActivity() {
         kind = detectKind(contentResolver, uri, docName)
         textLines = null
         docBlocks = null
+        sheets = null
+        slideCount = 0
         if (kind == Kind.Unsupported) {
             hasSaved = false
             phase = Phase.Failed
@@ -601,8 +608,26 @@ class MainActivity : ComponentActivity() {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     contentResolver.openInputStream(uri)!!.use { input ->
-                        if (k == Kind.Text) textLines = readTextLines(input)
-                        else docBlocks = parseDocx(input)
+                        when (k) {
+                            Kind.Text -> textLines = readTextLines(input)
+                            Kind.Sheet -> sheets = Office.readSheets(input)
+                            Kind.Slides -> {
+                                val sl = Office.readSlides(input)
+                                slideCount = sl.size
+                                docBlocks = slidesToBlocks(sl)
+                            }
+                            else -> {
+                                val bytes = Office.readAll(input)
+                                docBlocks = if (Office.isOleBytes(bytes)) {
+                                    Office.readDoc(bytes).map { line ->
+                                        DocPara(if (line.isEmpty()) emptyList() else listOf(DocRun(line)), 0, false)
+                                    }
+                                } else {
+                                    parseDocx(java.io.ByteArrayInputStream(bytes))
+                                }
+                            }
+                        }
+                        Unit
                     }
                 }
             }

@@ -8,7 +8,7 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.zip.ZipInputStream
 
-internal enum class Kind { Pdf, Text, Word, Unsupported }
+internal enum class Kind { Pdf, Text, Word, Sheet, Slides, Unsupported }
 
 internal data class DocRun(
     val text: String,
@@ -29,16 +29,22 @@ internal fun detectKind(cr: ContentResolver, uri: Uri, name: String?): Kind {
     when (ext) {
         "pdf" -> return Kind.Pdf
         "txt", "log", "md", "csv", "json", "xml", "ini", "conf", "text" -> return Kind.Text
-        "docx" -> return Kind.Word
-        "doc", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf" -> return Kind.Unsupported
+        "docx", "doc" -> return Kind.Word
+        "xls", "xlsx", "xlsm" -> return Kind.Sheet
+        "ppt", "pptx" -> return Kind.Slides
+        "odt", "ods", "odp", "rtf" -> return Kind.Unsupported
     }
     val mime = try { cr.getType(uri) } catch (_: Exception) { null }
     return when {
         mime == null -> Kind.Pdf
         mime == "application/pdf" -> Kind.Pdf
         mime.startsWith("text/") -> Kind.Text
-        mime == DOCX_MIME -> Kind.Word
-        mime.startsWith("application/vnd.") || mime == "application/msword" -> Kind.Unsupported
+        mime == DOCX_MIME || mime == "application/msword" -> Kind.Word
+        mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+            mime == "application/vnd.ms-excel" -> Kind.Sheet
+        mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation" ||
+            mime == "application/vnd.ms-powerpoint" -> Kind.Slides
+        mime.startsWith("application/vnd.") -> Kind.Unsupported
         else -> Kind.Pdf
     }
 }
@@ -61,6 +67,22 @@ internal fun readTextLines(input: InputStream): List<String> {
     val lines = text.replace("\r\n", "\n").replace('\r', '\n').split('\n').toMutableList()
     if (truncated) lines.add("… (file cut off after 8 MB)")
     return lines
+}
+
+/** Turns the slides of a PowerPoint file into blocks the Word viewer can show. */
+internal fun slidesToBlocks(slides: List<Office.Slide>): List<DocBlock> {
+    val out = ArrayList<DocBlock>()
+    slides.forEachIndexed { i, s ->
+        if (i > 0) out.add(DocPara(emptyList(), 0, false))
+        out.add(DocPara(listOf(DocRun("Slide ${i + 1}", bold = true)), 3, false))
+        val title = s.title
+        if (!title.isNullOrBlank()) out.add(DocPara(listOf(DocRun(title, bold = true)), 2, false))
+        for (line in s.body) out.add(DocPara(listOf(DocRun(line)), 0, true))
+        if (title.isNullOrBlank() && s.body.isEmpty()) {
+            out.add(DocPara(listOf(DocRun("(no text on this slide)", italic = true)), 0, false))
+        }
+    }
+    return out
 }
 
 /** Reads the text, headings, bold/italic/underline, bullets and tables of a .docx file. */
@@ -109,6 +131,7 @@ private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
     var bold = false
     var italic = false
     var underline = false
+    var inTabs = false
 
     var ev = parser.eventType
     while (ev != XmlPullParser.END_DOCUMENT) {
@@ -146,8 +169,10 @@ private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
                     val t = parser.nextText()
                     if (t.isNotEmpty()) runs.add(DocRun(t, bold, italic, underline))
                 }
+                "w:tabs" -> inTabs = true
                 "w:tab" -> {
-                    runs.add(DocRun("\t"))
+                    // inside <w:tabs> this is only a tab-stop definition, not a tab character
+                    if (!inTabs) runs.add(DocRun("\t"))
                 }
                 "w:br", "w:cr" -> {
                     runs.add(DocRun("\n"))
@@ -158,6 +183,7 @@ private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
             }
         } else if (ev == XmlPullParser.END_TAG) {
             when (parser.name) {
+                "w:tabs" -> inTabs = false
                 "w:p" -> {
                     val cur = stack.lastOrNull()
                     if (cur != null) {
