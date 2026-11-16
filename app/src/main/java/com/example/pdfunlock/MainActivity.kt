@@ -100,12 +100,12 @@ import java.security.MessageDigest
 
 // ---- Artefact look: Candy accents, Plus Jakarta Sans, wallpaper + glass-style surfaces ----
 
-private val Sky = Color(0xFF0A84FF)       // Candy.Sky: the primary action
+internal val Sky = Color(0xFF0A84FF)       // Candy.Sky: the primary action
 private val Tomato = Color(0xFFFF5B4F)    // Candy.Tomato: errors
 private val InkLight = Color(0xFF172033)
 private val InkDark = Color(0xFFEEF1FF)
 
-private val Jakarta = FontFamily(
+internal val Jakarta = FontFamily(
     Font(R.font.jakarta, FontWeight.Normal, variationSettings = FontVariation.Settings(FontVariation.weight(400))),
     Font(R.font.jakarta, FontWeight.SemiBold, variationSettings = FontVariation.Settings(FontVariation.weight(600))),
     Font(R.font.jakarta, FontWeight.Bold, variationSettings = FontVariation.Settings(FontVariation.weight(700))),
@@ -120,7 +120,7 @@ private val BodyStrong = type(15, FontWeight.SemiBold)
 private val Body = type(15, FontWeight.Normal)
 private val Caption = type(12, FontWeight.Normal)
 
-private class Palette(val dark: Boolean) {
+internal class Palette(val dark: Boolean) {
     val ink = if (dark) InkDark else InkLight
     val inkSoft = ink.copy(alpha = 0.66f)
     val line = ink.copy(alpha = 0.10f)
@@ -164,7 +164,7 @@ private fun Modifier.pressScale(source: MutableInteractionSource): Modifier {
 
 /** Capsule button. With [tint] it is the vivid blue action pill, without it a frosted one. */
 @Composable
-private fun Pill(
+internal fun Pill(
     text: String,
     p: Palette,
     modifier: Modifier = Modifier,
@@ -265,6 +265,9 @@ class MainActivity : ComponentActivity() {
     private var askPassword by mutableStateOf(false)
     private var passwordWrong by mutableStateOf(false)
     private var prefill by mutableStateOf("")
+    private var kind by mutableStateOf(Kind.Pdf)
+    private var textLines by mutableStateOf<List<String>?>(null)
+    private var docBlocks by mutableStateOf<List<DocBlock>?>(null)
     private var hasSaved by mutableStateOf(false)
     private var message by mutableStateOf<String?>(null)
 
@@ -306,13 +309,21 @@ class MainActivity : ComponentActivity() {
             val doc = pages
             val pageWidthPx = with(density) { (maxWidth - 24.dp).roundToPx() }
 
-            if (doc != null && phase == Phase.Ready) {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(top = topInset + 84.dp, bottom = bottomInset + 96.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    items(doc.count) { i -> PageView(doc, i) }
+            val contentPad = PaddingValues(top = topInset + 84.dp, bottom = bottomInset + 96.dp)
+            if (phase == Phase.Ready) {
+                when (kind) {
+                    Kind.Pdf -> if (doc != null) {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = contentPad,
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            items(doc.count) { i -> PageView(doc, i) }
+                        }
+                    }
+                    Kind.Text -> TextViewer(textLines ?: emptyList(), p, contentPad) { message = it }
+                    Kind.Word -> WordViewer(docBlocks ?: emptyList(), contentPad)
+                    else -> {}
                 }
             }
 
@@ -333,19 +344,19 @@ class MainActivity : ComponentActivity() {
                             Pill("Enter password", p, tint = Sky) { passwordWrong = false; askPassword = true }
                         }
                         Phase.Failed -> {
-                            Text("Couldn’t open this PDF", p.ink, Headline.copy(fontSize = 26.sp), textAlign = TextAlign.Center)
+                            Text("Couldn’t open this file", p.ink, Headline.copy(fontSize = 26.sp), textAlign = TextAlign.Center)
                             Spacer(Modifier.height(18.dp))
-                            Pill("Open another PDF", p, tint = Sky) { openLauncher.launch(arrayOf("application/pdf")) }
+                            Pill("Open another file", p, tint = Sky) { openLauncher.launch(arrayOf("*/*")) }
                         }
                         else -> {
                             Text("PDF Unlock", p.ink, Headline)
                             Spacer(Modifier.height(10.dp))
                             Text(
-                                "Open a password-protected PDF, unlock it and save a copy that opens without the password.",
+                                "Unlock a password-protected PDF and save a copy without the password. Word (.docx) and text files open too.",
                                 p.inkSoft, Body, textAlign = TextAlign.Center
                             )
                             Spacer(Modifier.height(22.dp))
-                            Pill("Open PDF", p, tint = Sky) { openLauncher.launch(arrayOf("application/pdf")) }
+                            Pill("Open file", p, tint = Sky) { openLauncher.launch(arrayOf("*/*")) }
                         }
                     }
                 }
@@ -365,7 +376,12 @@ class MainActivity : ComponentActivity() {
                 ) {
                     Text(docName ?: "PDF", p.ink, Title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     val sub = when (phase) {
-                        Phase.Ready -> "Unlocked · ${pages?.count ?: 0} pages"
+                        Phase.Ready -> when (kind) {
+                            Kind.Pdf -> "Unlocked · ${pages?.count ?: 0} pages"
+                            Kind.Text -> "Text · ${textLines?.size ?: 0} lines · tap a line to copy"
+                            Kind.Word -> "Word document"
+                            else -> ""
+                        }
                         Phase.Loading -> "Unlocking…"
                         Phase.Locked -> "Locked"
                         else -> "Couldn’t open"
@@ -385,15 +401,17 @@ class MainActivity : ComponentActivity() {
                         .padding(8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Pill("Open", p, Modifier.weight(1f)) { openLauncher.launch(arrayOf("application/pdf")) }
-                    if (hasSaved) {
+                    Pill("Open", p, Modifier.weight(1f)) { openLauncher.launch(arrayOf("*/*")) }
+                    if (hasSaved && kind == Kind.Pdf) {
                         Pill("Forget password", p, Modifier.weight(1.5f)) { forgetPassword() }
                     }
-                    Pill(
-                        "Save unlocked", p, Modifier.weight(1.5f),
-                        tint = Sky, enabled = phase == Phase.Ready
-                    ) {
-                        saveLauncher.launch((docName ?: "document.pdf").substringBeforeLast('.') + "_unlocked.pdf")
+                    if (kind == Kind.Pdf) {
+                        Pill(
+                            "Save unlocked", p, Modifier.weight(1.5f),
+                            tint = Sky, enabled = phase == Phase.Ready
+                        ) {
+                            saveLauncher.launch((docName ?: "document.pdf").substringBeforeLast('.') + "_unlocked.pdf")
+                        }
                     }
                 }
             }
@@ -552,6 +570,20 @@ class MainActivity : ComponentActivity() {
         pages = null
         askPassword = false
         phase = Phase.Loading
+        kind = detectKind(contentResolver, uri, docName)
+        textLines = null
+        docBlocks = null
+        if (kind == Kind.Unsupported) {
+            hasSaved = false
+            phase = Phase.Failed
+            message = "This file type isn’t supported yet"
+            return
+        }
+        if (kind != Kind.Pdf) {
+            hasSaved = false
+            openOther(uri)
+            return
+        }
         lifecycleScope.launch {
             val fp = withContext(Dispatchers.IO) { fingerprintOf(uri) }
             fingerprint = fp
@@ -559,6 +591,27 @@ class MainActivity : ComponentActivity() {
             hasSaved = saved != null || PasswordStore.getLast(this@MainActivity) != null
             // Saved password is tried automatically; otherwise an empty one (unprotected PDFs)
             tryUnlock(saved ?: "", fromUser = false)
+        }
+    }
+
+    /** Text and Word files: no password step, just read and show. */
+    private fun openOther(uri: Uri) {
+        val k = kind
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    contentResolver.openInputStream(uri)!!.use { input ->
+                        if (k == Kind.Text) textLines = readTextLines(input)
+                        else docBlocks = parseDocx(input)
+                    }
+                }
+            }
+            if (result.isSuccess) {
+                phase = Phase.Ready
+            } else {
+                phase = Phase.Failed
+                message = "Error: ${result.exceptionOrNull()?.message ?: "unknown"}"
+            }
         }
     }
 
