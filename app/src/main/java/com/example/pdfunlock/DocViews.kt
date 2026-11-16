@@ -4,6 +4,13 @@ package com.example.pdfunlock
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.runtime.produceState
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.horizontalScroll
@@ -340,9 +347,39 @@ internal fun WordViewer(blocks: List<DocBlock>, pad: PaddingValues, emptyColor: 
                 when (val b = blocks[i]) {
                     is DocPara -> ParaView(b)
                     is DocTable -> TableView(b)
+                    is DocImage -> ImageView(b)
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ImageView(img: DocImage) {
+    val bmp by produceState<android.graphics.Bitmap?>(null, img) {
+        value = withContext(Dispatchers.Default) {
+            try {
+                val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(img.bytes, 0, img.bytes.size, o)
+                var sample = 1
+                while (o.outWidth / (sample * 2) >= 1400) sample *= 2
+                val o2 = BitmapFactory.Options().apply { inSampleSize = sample }
+                BitmapFactory.decodeByteArray(img.bytes, 0, img.bytes.size, o2)
+            } catch (_: Throwable) {
+                null
+            }
+        }
+    }
+    val b = bmp
+    if (b != null) {
+        Image(
+            bitmap = b.asImageBitmap(),
+            contentDescription = null,
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            contentScale = ContentScale.FillWidth
+        )
+    } else {
+        Spacer(Modifier.height(24.dp))
     }
 }
 

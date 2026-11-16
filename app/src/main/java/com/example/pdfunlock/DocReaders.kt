@@ -20,6 +20,8 @@ internal data class DocRun(
 internal sealed interface DocBlock
 internal data class DocPara(val runs: List<DocRun>, val heading: Int, val bullet: Boolean) : DocBlock
 internal data class DocTable(val rows: List<List<String>>) : DocBlock
+/** A picture inside the document (raw png/jpg/gif/bmp/webp bytes). */
+internal class DocImage(val bytes: ByteArray) : DocBlock
 
 private const val DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -90,10 +92,19 @@ internal fun parseDocx(input: InputStream): List<DocBlock> {
     val zip = ZipInputStream(input)
     val names = ArrayList<String>()
     var xml: ByteArray? = null
+    var relsXml: ByteArray? = null
+    val media = HashMap<String, ByteArray>()
+    var mediaBytes = 0
     var entry = zip.nextEntry
     while (entry != null) {
         names.add(entry.name)
         val n = entry.name.lowercase().trimStart('/')
+        if (n == "word/_rels/document.xml.rels") relsXml = zip.readBytes()
+        else if (n.startsWith("word/media/") && Regex(".*\\.(png|jpe?g|gif|bmp|webp)$").matches(n) && mediaBytes < 30_000_000) {
+            val b = zip.readBytes()
+            mediaBytes += b.size
+            media[n] = b
+        }
         val isMain = n == "word/document.xml" ||
             (xml == null && n.startsWith("word/document") && n.endsWith(".xml"))
         if (isMain) xml = zip.readBytes()
@@ -102,10 +113,22 @@ internal fun parseDocx(input: InputStream): List<DocBlock> {
     val data = xml ?: throw IllegalArgumentException("This Word file is protected or is not a valid .docx")
 
     fun hasText(list: List<DocBlock>) = list.any {
-        it is DocTable || (it is DocPara && it.runs.any { r -> r.text.isNotBlank() })
+        it is DocTable || it is DocImage || (it is DocPara && it.runs.any { r -> r.text.isNotBlank() })
     }
 
-    var blocks = try { parseDocumentXml(java.io.ByteArrayInputStream(data)) } catch (_: Exception) { emptyList() }
+    val images = HashMap<String, ByteArray>()
+    if (relsXml != null) {
+        try {
+            for ((id, target) in readRels(java.io.ByteArrayInputStream(relsXml))) {
+                val path = if (target.startsWith("/")) target.trimStart('/') else "word/" + target
+                val b = media[path.lowercase()]
+                if (b != null) images[id] = b
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    var blocks = try { parseDocumentXml(java.io.ByteArrayInputStream(data), images) } catch (_: Exception) { emptyList() }
     if (!hasText(blocks)) {
         // backup: plain paragraphs from any prefix, ignoring tables and styling
         val flat = try { flatParagraphs(java.io.ByteArrayInputStream(data)) } catch (_: Exception) { emptyList() }
@@ -117,6 +140,23 @@ internal fun parseDocx(input: InputStream): List<DocBlock> {
         )
     }
     return blocks
+}
+
+/** relationship id -> target path, from word/_rels/document.xml.rels */
+private fun readRels(stream: InputStream): List<Pair<String, String>> {
+    val parser = Xml.newPullParser()
+    parser.setInput(stream, "UTF-8")
+    val out = ArrayList<Pair<String, String>>()
+    var ev = parser.eventType
+    while (ev != XmlPullParser.END_DOCUMENT) {
+        if (ev == XmlPullParser.START_TAG && parser.name.substringAfterLast(':') == "Relationship") {
+            val id = attr(parser, "Id")
+            val target = attr(parser, "Target")
+            if (id != null && target != null) out.add(id to target)
+        }
+        ev = parser.next()
+    }
+    return out
 }
 
 /** Fallback reader: every paragraph (<p>) with its text (<t>), whatever the XML prefix is. */
@@ -185,9 +225,10 @@ private class TblCtx {
     var row = ArrayList<String>()
     var cell = StringBuilder()
     val cellBlocks = ArrayList<DocBlock>()
+    val imgs = ArrayList<DocImage>()
 }
 
-private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
+private fun parseDocumentXml(stream: InputStream, images: Map<String, ByteArray>): List<DocBlock> {
     val parser = Xml.newPullParser()
     parser.setInput(stream, "UTF-8")
 
@@ -200,10 +241,26 @@ private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
     var italic = false
     var underline = false
     var inTabs = false
+    var fallbackDepth = 0           // inside <mc:Fallback>: duplicate of the real drawing, skip
+    var drawOpen = false
+    var blipFound = false
+    val paraImgs = ArrayList<DocImage>()
 
     var ev = parser.eventType
     while (ev != XmlPullParser.END_DOCUMENT) {
         if (ev == XmlPullParser.START_TAG) {
+            val raw = parser.name ?: ""
+            val rawLocal = raw.substringAfterLast(':')
+            if (rawLocal == "Fallback") fallbackDepth++
+            if (fallbackDepth == 0 && (rawLocal == "blip" || rawLocal == "imagedata")) {
+                val rid = attr(parser, "embed") ?: attr(parser, "id")
+                val bytes = if (rid != null) images[rid] else null
+                if (bytes != null) {
+                    paraImgs.add(DocImage(bytes))
+                    blipFound = true
+                }
+            }
+            if (fallbackDepth > 0) { ev = parser.next(); continue }
             when (localName(parser)) {
                 "tbl" -> stack.add(TblCtx())
                 "tr" -> stack.lastOrNull()?.row = ArrayList()
@@ -212,6 +269,7 @@ private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
                     runs = ArrayList()
                     heading = 0
                     bullet = false
+                    paraImgs.clear()
                 }
                 "pStyle" -> {
                     heading = headingLevel(attr(parser, "val") ?: "")
@@ -246,19 +304,35 @@ private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
                     runs.add(DocRun("\n"))
                 }
                 "drawing", "pict" -> {
-                    runs.add(DocRun("[image]", italic = true))
+                    drawOpen = true
+                    blipFound = false
                 }
             }
         } else if (ev == XmlPullParser.END_TAG) {
+            if ((parser.name ?: "").substringAfterLast(':') == "Fallback") {
+                if (fallbackDepth > 0) fallbackDepth--
+                ev = parser.next(); continue
+            }
+            if (fallbackDepth > 0) { ev = parser.next(); continue }
             when (localName(parser)) {
                 "tabs" -> inTabs = false
+                "drawing", "pict" -> {
+                    if (drawOpen && !blipFound) runs.add(DocRun("[image]", italic = true))
+                    drawOpen = false
+                }
                 "p" -> {
                     val cur = stack.lastOrNull()
+                    val imgs = ArrayList(paraImgs)
+                    paraImgs.clear()
+                    val showPara = runs.isNotEmpty() || imgs.isEmpty()
                     if (cur != null) {
                         cur.cell.append(runs.joinToString("") { it.text }).append('\n')
-                        cur.cellBlocks.add(DocPara(runs, heading, bullet))
+                        if (showPara) cur.cellBlocks.add(DocPara(runs, heading, bullet))
+                        cur.cellBlocks.addAll(imgs)
+                        cur.imgs.addAll(imgs)
                     } else {
-                        blocks.add(DocPara(runs, heading, bullet))
+                        if (showPara) blocks.add(DocPara(runs, heading, bullet))
+                        blocks.addAll(imgs)
                     }
                 }
                 "tc" -> stack.lastOrNull()?.let { it.row.add(it.cell.toString().trim()) }
@@ -268,11 +342,12 @@ private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
                     val parent = stack.lastOrNull()
                     // a 1x1 table is just a layout wrapper: show its content directly
                     val single = t.rows.size == 1 && t.rows[0].size == 1
-                    val produced: List<DocBlock> = if (single) t.cellBlocks.toList() else listOf(DocTable(t.rows))
+                    val produced: List<DocBlock> = if (single) t.cellBlocks.toList() else listOf<DocBlock>(DocTable(t.rows)) + t.imgs
                     if (parent == null) {
                         blocks.addAll(produced)
                     } else {
                         parent.cellBlocks.addAll(produced)
+                        parent.imgs.addAll(produced.filterIsInstance<DocImage>())
                         parent.cell.append(t.rows.joinToString("\n") { it.joinToString("  |  ") }).append('\n')
                     }
                 }
