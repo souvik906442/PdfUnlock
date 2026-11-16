@@ -88,12 +88,72 @@ internal fun slidesToBlocks(slides: List<Office.Slide>): List<DocBlock> {
 /** Reads the text, headings, bold/italic/underline, bullets and tables of a .docx file. */
 internal fun parseDocx(input: InputStream): List<DocBlock> {
     val zip = ZipInputStream(input)
+    val names = ArrayList<String>()
+    var xml: ByteArray? = null
     var entry = zip.nextEntry
     while (entry != null) {
-        if (entry.name == "word/document.xml") return parseDocumentXml(zip)
+        names.add(entry.name)
+        val n = entry.name.lowercase().trimStart('/')
+        val isMain = n == "word/document.xml" ||
+            (xml == null && n.startsWith("word/document") && n.endsWith(".xml"))
+        if (isMain) xml = zip.readBytes()
         entry = zip.nextEntry
     }
-    throw IllegalArgumentException("This Word file is protected or is not a valid .docx")
+    val data = xml ?: throw IllegalArgumentException("This Word file is protected or is not a valid .docx")
+
+    fun hasText(list: List<DocBlock>) = list.any {
+        it is DocTable || (it is DocPara && it.runs.any { r -> r.text.isNotBlank() })
+    }
+
+    var blocks = try { parseDocumentXml(java.io.ByteArrayInputStream(data)) } catch (_: Exception) { emptyList() }
+    if (!hasText(blocks)) {
+        // backup: plain paragraphs from any prefix, ignoring tables and styling
+        val flat = try { flatParagraphs(java.io.ByteArrayInputStream(data)) } catch (_: Exception) { emptyList() }
+        if (hasText(flat)) blocks = flat
+    }
+    if (!hasText(blocks)) {
+        throw IllegalArgumentException(
+            "No text found in word/document.xml (${data.size} bytes). Parts: ${names.take(12).joinToString()}"
+        )
+    }
+    return blocks
+}
+
+/** Fallback reader: every paragraph (<p>) with its text (<t>), whatever the XML prefix is. */
+private fun flatParagraphs(stream: InputStream): List<DocBlock> {
+    val skip = setOf("a", "wp", "wps", "wp14", "pic", "c", "dgm", "v", "o")
+    val parser = Xml.newPullParser()
+    parser.setInput(stream, "UTF-8")
+    val out = ArrayList<DocBlock>()
+    var sb = StringBuilder()
+    var ev = parser.eventType
+    while (ev != XmlPullParser.END_DOCUMENT) {
+        val full = parser.name ?: ""
+        val pre = full.substringBefore(':', "")
+        val nm = if (pre in skip) "" else full.substringAfterLast(':')
+        if (ev == XmlPullParser.START_TAG) {
+            when (nm) {
+                "p" -> sb = StringBuilder()
+                "t" -> sb.append(parser.nextText())
+                "tab" -> sb.append('\t')
+                "br", "cr" -> sb.append('\n')
+            }
+        } else if (ev == XmlPullParser.END_TAG && nm == "p") {
+            val t = sb.toString()
+            out.add(DocPara(if (t.isEmpty()) emptyList() else listOf(DocRun(t)), 0, false))
+            sb = StringBuilder()
+        }
+        ev = parser.next()
+    }
+    return out
+}
+
+/** Reads an attribute by its local name, so it works with any XML prefix (w:val, val, ns0:val). */
+private fun attr(p: XmlPullParser, local: String): String? {
+    for (i in 0 until p.attributeCount) {
+        if (p.getAttributeName(i).substringAfterLast(':') == local) return p.getAttributeValue(i)
+    }
+    return null
 }
 
 private fun headingLevel(style: String): Int {
@@ -106,8 +166,16 @@ private fun headingLevel(style: String): Int {
     }
 }
 
+/** Local tag name for Word's own tags (prefix w, none, or an unknown one); "" for drawing/other namespaces. */
+private fun localName(p: XmlPullParser): String {
+    val full = p.name ?: return ""
+    val pre = full.substringBefore(':', "")
+    if (pre in setOf("a", "wp", "wps", "wp14", "pic", "c", "dgm", "v", "o", "m", "mc", "w14", "w15")) return ""
+    return full.substringAfterLast(':')
+}
+
 private fun flagOn(parser: XmlPullParser): Boolean {
-    val v = parser.getAttributeValue(null, "w:val")
+    val v = attr(parser, "val")
     return v == null || (v != "0" && v != "false")
 }
 
@@ -136,55 +204,55 @@ private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
     var ev = parser.eventType
     while (ev != XmlPullParser.END_DOCUMENT) {
         if (ev == XmlPullParser.START_TAG) {
-            when (parser.name) {
-                "w:tbl" -> stack.add(TblCtx())
-                "w:tr" -> stack.lastOrNull()?.row = ArrayList()
-                "w:tc" -> stack.lastOrNull()?.let { it.cell = StringBuilder(); it.cellBlocks.clear() }
-                "w:p" -> {
+            when (localName(parser)) {
+                "tbl" -> stack.add(TblCtx())
+                "tr" -> stack.lastOrNull()?.row = ArrayList()
+                "tc" -> stack.lastOrNull()?.let { it.cell = StringBuilder(); it.cellBlocks.clear() }
+                "p" -> {
                     runs = ArrayList()
                     heading = 0
                     bullet = false
                 }
-                "w:pStyle" -> {
-                    heading = headingLevel(parser.getAttributeValue(null, "w:val") ?: "")
+                "pStyle" -> {
+                    heading = headingLevel(attr(parser, "val") ?: "")
                 }
-                "w:numPr" -> {
+                "numPr" -> {
                     bullet = true
                 }
-                "w:r" -> {
+                "r" -> {
                     bold = false
                     italic = false
                     underline = false
                 }
-                "w:b" -> {
+                "b" -> {
                     bold = flagOn(parser)
                 }
-                "w:i" -> {
+                "i" -> {
                     italic = flagOn(parser)
                 }
-                "w:u" -> {
-                    underline = (parser.getAttributeValue(null, "w:val") ?: "single") != "none"
+                "u" -> {
+                    underline = (attr(parser, "val") ?: "single") != "none"
                 }
-                "w:t" -> {
+                "t" -> {
                     val t = parser.nextText()
                     if (t.isNotEmpty()) runs.add(DocRun(t, bold, italic, underline))
                 }
-                "w:tabs" -> inTabs = true
-                "w:tab" -> {
+                "tabs" -> inTabs = true
+                "tab" -> {
                     // inside <w:tabs> this is only a tab-stop definition, not a tab character
                     if (!inTabs) runs.add(DocRun("\t"))
                 }
-                "w:br", "w:cr" -> {
+                "br", "cr" -> {
                     runs.add(DocRun("\n"))
                 }
-                "w:drawing", "w:pict" -> {
+                "drawing", "pict" -> {
                     runs.add(DocRun("[image]", italic = true))
                 }
             }
         } else if (ev == XmlPullParser.END_TAG) {
-            when (parser.name) {
-                "w:tabs" -> inTabs = false
-                "w:p" -> {
+            when (localName(parser)) {
+                "tabs" -> inTabs = false
+                "p" -> {
                     val cur = stack.lastOrNull()
                     if (cur != null) {
                         cur.cell.append(runs.joinToString("") { it.text }).append('\n')
@@ -193,9 +261,9 @@ private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
                         blocks.add(DocPara(runs, heading, bullet))
                     }
                 }
-                "w:tc" -> stack.lastOrNull()?.let { it.row.add(it.cell.toString().trim()) }
-                "w:tr" -> stack.lastOrNull()?.let { it.rows.add(it.row) }
-                "w:tbl" -> if (stack.isNotEmpty()) {
+                "tc" -> stack.lastOrNull()?.let { it.row.add(it.cell.toString().trim()) }
+                "tr" -> stack.lastOrNull()?.let { it.rows.add(it.row) }
+                "tbl" -> if (stack.isNotEmpty()) {
                     val t = stack.removeAt(stack.size - 1)
                     val parent = stack.lastOrNull()
                     // a 1x1 table is just a layout wrapper: show its content directly

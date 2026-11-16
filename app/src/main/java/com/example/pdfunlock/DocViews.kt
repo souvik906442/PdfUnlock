@@ -199,7 +199,7 @@ internal fun SheetViewer(
 ) {
     if (sheets.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(pad), contentAlignment = Alignment.Center) {
-            Text("No sheets found in this file", color = PaperInk.copy(alpha = 0.7f), fontSize = 14.sp)
+            Text("No sheets found in this file", color = p.inkSoft, fontSize = 14.sp)
         }
         return
     }
@@ -315,10 +315,10 @@ private fun colName(c: Int): String {
 }
 
 @Composable
-internal fun WordViewer(blocks: List<DocBlock>, pad: PaddingValues) {
+internal fun WordViewer(blocks: List<DocBlock>, pad: PaddingValues, emptyColor: Color = Color.White) {
     if (blocks.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(pad), contentAlignment = Alignment.Center) {
-            Text("No readable text found in this document", color = PaperInk.copy(alpha = 0.7f), fontSize = 14.sp)
+            Text("No readable text found in this document", color = emptyColor, fontSize = 14.sp)
         }
         return
     }

@@ -324,7 +324,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     Kind.Text -> TextViewer(textLines ?: emptyList(), p, contentPad) { message = it }
-                    Kind.Word, Kind.Slides -> WordViewer(docBlocks ?: emptyList(), contentPad)
+                    Kind.Word, Kind.Slides -> WordViewer(docBlocks ?: emptyList(), contentPad, p.inkSoft)
                     Kind.Sheet -> SheetViewer(sheets ?: emptyList(), p, contentPad) { message = it }
                     else -> {}
                 }
