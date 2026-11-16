@@ -6,6 +6,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.clickable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,9 +61,10 @@ private fun paperShape(i: Int, n: Int): RoundedCornerShape {
 }
 
 /**
- * Line-by-line text viewer built for copying:
- * tap a line to select it (tap again to unselect), long-press a line to select everything
- * from the last tapped line down/up to it, then press Copy.
+ * Text viewer built for copying:
+ * - long-press any word, then drag the handles to select exactly as much text as you want
+ *   (works across lines too); use the system "Copy" popup.
+ * - tap a line to select the whole line (tap again to unselect); All / Clear / Copy bar appears.
  */
 @Composable
 internal fun TextViewer(
@@ -74,8 +77,15 @@ internal fun TextViewer(
     var anchor by remember(lines) { mutableStateOf(-1) }
     val clipboard = LocalClipboardManager.current
 
+    // extra room at the bottom so the last lines can always scroll above the selection bar
+    val listPad = PaddingValues(
+        top = pad.calculateTopPadding(),
+        bottom = pad.calculateBottomPadding() + 84.dp
+    )
+
     Box(Modifier.fillMaxSize()) {
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+        SelectionContainer(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad) {
             items(lines.size) { i ->
                 val isSel = i in selected
                 Row(
@@ -85,17 +95,10 @@ internal fun TextViewer(
                         .clip(paperShape(i, lines.size))
                         .background(Color.White)
                         .background(if (isSel) Sky.copy(alpha = 0.22f) else Color.Transparent)
-                        .combinedClickable(
-                            onClick = {
-                                selected = if (isSel) selected - i else selected + i
-                                anchor = i
-                            },
-                            onLongClick = {
-                                val a = if (anchor >= 0) anchor else i
-                                selected = selected + (minOf(a, i)..maxOf(a, i))
-                                anchor = i
-                            }
-                        )
+                        .clickable {
+                            selected = if (isSel) selected - i else selected + i
+                            anchor = i
+                        }
                         .padding(
                             start = 8.dp,
                             end = 14.dp,
@@ -118,16 +121,17 @@ internal fun TextViewer(
                 }
             }
         }
+        }
 
         if (selected.isNotEmpty()) {
             val barShape = RoundedCornerShape(26.dp)
             Row(
                 Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = pad.calculateBottomPadding(), start = 12.dp, end = 12.dp)
+                    .padding(bottom = pad.calculateBottomPadding() - 8.dp, start = 12.dp, end = 12.dp)
                     .fillMaxWidth()
                     .clip(barShape)
-                    .background(p.frost)
+                    .background(p.frost.copy(alpha = 1f))
                     .border(1.dp, p.rim, barShape)
                     .padding(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)

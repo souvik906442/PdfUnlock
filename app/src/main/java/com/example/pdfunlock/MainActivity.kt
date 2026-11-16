@@ -378,7 +378,7 @@ class MainActivity : ComponentActivity() {
                     val sub = when (phase) {
                         Phase.Ready -> when (kind) {
                             Kind.Pdf -> "Unlocked · ${pages?.count ?: 0} pages"
-                            Kind.Text -> "Text · ${textLines?.size ?: 0} lines · tap a line to copy"
+                            Kind.Text -> "Text · ${textLines?.size ?: 0} lines · long-press to select text · tap a line
                             Kind.Word -> "Word document"
                             else -> ""
                         }
