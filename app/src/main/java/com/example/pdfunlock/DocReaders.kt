@@ -89,15 +89,20 @@ private fun flagOn(parser: XmlPullParser): Boolean {
     return v == null || (v != "0" && v != "false")
 }
 
+/** One open <w:tbl>; tables can be nested (many Word forms put everything inside one big outer cell). */
+private class TblCtx {
+    val rows = ArrayList<List<String>>()
+    var row = ArrayList<String>()
+    var cell = StringBuilder()
+    val cellBlocks = ArrayList<DocBlock>()
+}
+
 private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
     val parser = Xml.newPullParser()
     parser.setInput(stream, "UTF-8")
 
     val blocks = ArrayList<DocBlock>()
-    var tableDepth = 0
-    var rows = ArrayList<List<String>>()
-    var row = ArrayList<String>()
-    var cell = StringBuilder()
+    val stack = ArrayList<TblCtx>()
     var runs = ArrayList<DocRun>()
     var heading = 0
     var bullet = false
@@ -109,16 +114,9 @@ private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
     while (ev != XmlPullParser.END_DOCUMENT) {
         if (ev == XmlPullParser.START_TAG) {
             when (parser.name) {
-                "w:tbl" -> {
-                    if (tableDepth == 0) rows = ArrayList()
-                    tableDepth++
-                }
-                "w:tr" -> {
-                    if (tableDepth == 1) row = ArrayList()
-                }
-                "w:tc" -> {
-                    if (tableDepth == 1) cell = StringBuilder()
-                }
+                "w:tbl" -> stack.add(TblCtx())
+                "w:tr" -> stack.lastOrNull()?.row = ArrayList()
+                "w:tc" -> stack.lastOrNull()?.let { it.cell = StringBuilder(); it.cellBlocks.clear() }
                 "w:p" -> {
                     runs = ArrayList()
                     heading = 0
@@ -161,21 +159,28 @@ private fun parseDocumentXml(stream: InputStream): List<DocBlock> {
         } else if (ev == XmlPullParser.END_TAG) {
             when (parser.name) {
                 "w:p" -> {
-                    if (tableDepth > 0) {
-                        cell.append(runs.joinToString("") { it.text }).append('\n')
+                    val cur = stack.lastOrNull()
+                    if (cur != null) {
+                        cur.cell.append(runs.joinToString("") { it.text }).append('\n')
+                        cur.cellBlocks.add(DocPara(runs, heading, bullet))
                     } else {
                         blocks.add(DocPara(runs, heading, bullet))
                     }
                 }
-                "w:tc" -> {
-                    if (tableDepth == 1) row.add(cell.toString().trim())
-                }
-                "w:tr" -> {
-                    if (tableDepth == 1) rows.add(row)
-                }
-                "w:tbl" -> {
-                    tableDepth--
-                    if (tableDepth == 0) blocks.add(DocTable(rows))
+                "w:tc" -> stack.lastOrNull()?.let { it.row.add(it.cell.toString().trim()) }
+                "w:tr" -> stack.lastOrNull()?.let { it.rows.add(it.row) }
+                "w:tbl" -> if (stack.isNotEmpty()) {
+                    val t = stack.removeAt(stack.size - 1)
+                    val parent = stack.lastOrNull()
+                    // a 1x1 table is just a layout wrapper: show its content directly
+                    val single = t.rows.size == 1 && t.rows[0].size == 1
+                    val produced: List<DocBlock> = if (single) t.cellBlocks.toList() else listOf(DocTable(t.rows))
+                    if (parent == null) {
+                        blocks.addAll(produced)
+                    } else {
+                        parent.cellBlocks.addAll(produced)
+                        parent.cell.append(t.rows.joinToString("\n") { it.joinToString("  |  ") }).append('\n')
+                    }
                 }
             }
         }

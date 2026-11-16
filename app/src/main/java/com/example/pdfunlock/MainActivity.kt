@@ -378,7 +378,7 @@ class MainActivity : ComponentActivity() {
                     val sub = when (phase) {
                         Phase.Ready -> when (kind) {
                             Kind.Pdf -> "Unlocked · ${pages?.count ?: 0} pages"
-                            Kind.Text -> "Text · ${textLines?.size ?: 0} lines · long-press to select text · tap a line"
+                            Kind.Text -> "Text · ${textLines?.size ?: 0} lines · tap a line, or Words for exact text"
                             Kind.Word -> "Word document"
                             else -> ""
                         }
@@ -423,7 +423,7 @@ class MainActivity : ComponentActivity() {
                 Box(
                     Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = bottomInset + 96.dp)
+                        .padding(bottom = bottomInset + (if (kind == Kind.Text) 176.dp else 96.dp))
                         .clip(RoundedCornerShape(50))
                         .background(p.frost)
                         .border(1.dp, p.rim, RoundedCornerShape(50))

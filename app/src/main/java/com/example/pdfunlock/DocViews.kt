@@ -6,8 +6,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.clickable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,10 +61,14 @@ private fun paperShape(i: Int, n: Int): RoundedCornerShape {
 }
 
 /**
- * Text viewer built for copying:
- * - long-press any word, then drag the handles to select exactly as much text as you want
- *   (works across lines too); use the system "Copy" popup.
- * - tap a line to select the whole line (tap again to unselect); All / Clear / Copy bar appears.
+ * Text viewer built for copying, two modes:
+ *  - Lines: tap a line to select it (tap again to unselect), long-press a line to select a range
+ *    from the last tapped line, then press Copy.
+ *  - Words: normal Android text selection — long-press a word, drag the handles to pick exactly
+ *    the part you want (even a few letters inside a line, across many lines), then use the
+ *    system "Copy" popup.
+ * The control bar floats above the bottom bar, and the list has extra bottom padding so
+ * the last lines can always be scrolled above it.
  */
 @Composable
 internal fun TextViewer(
@@ -75,76 +79,98 @@ internal fun TextViewer(
 ) {
     var selected by remember(lines) { mutableStateOf(emptySet<Int>()) }
     var anchor by remember(lines) { mutableStateOf(-1) }
+    var wordMode by remember(lines) { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
 
-    // extra room at the bottom so the last lines can always scroll above the selection bar
-    val listPad = PaddingValues(
-        top = pad.calculateTopPadding(),
-        bottom = pad.calculateBottomPadding() + 84.dp
-    )
+    // room for the floating selection bar so it never hides the last lines
+    val listPad = PaddingValues(top = pad.calculateTopPadding(), bottom = pad.calculateBottomPadding() + 84.dp)
 
     Box(Modifier.fillMaxSize()) {
-        SelectionContainer(Modifier.fillMaxSize()) {
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad) {
-            items(lines.size) { i ->
-                val isSel = i in selected
-                Row(
-                    Modifier
-                        .padding(horizontal = 12.dp)
-                        .fillMaxWidth()
-                        .clip(paperShape(i, lines.size))
-                        .background(Color.White)
-                        .background(if (isSel) Sky.copy(alpha = 0.22f) else Color.Transparent)
-                        .clickable {
-                            selected = if (isSel) selected - i else selected + i
-                            anchor = i
+        val list: @Composable () -> Unit = {
+            LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad) {
+                items(lines.size) { i ->
+                    val isSel = !wordMode && i in selected
+                    Row(
+                        Modifier
+                            .padding(horizontal = 12.dp)
+                            .fillMaxWidth()
+                            .clip(paperShape(i, lines.size))
+                            .background(Color.White)
+                            .background(if (isSel) Sky.copy(alpha = 0.22f) else Color.Transparent)
+                            .then(
+                                if (wordMode) Modifier else Modifier.combinedClickable(
+                                    onClick = {
+                                        selected = if (isSel) selected - i else selected + i
+                                        anchor = i
+                                    },
+                                    onLongClick = {
+                                        val a = if (anchor >= 0) anchor else i
+                                        selected = selected + (minOf(a, i)..maxOf(a, i))
+                                        anchor = i
+                                    }
+                                )
+                            )
+                            .padding(
+                                start = 8.dp,
+                                end = 14.dp,
+                                top = if (i == 0) 14.dp else 0.dp,
+                                bottom = if (i == lines.size - 1) 14.dp else 0.dp
+                            )
+                    ) {
+                        DisableSelection {
+                            Text(
+                                text = (i + 1).toString(),
+                                color = GridLine,
+                                style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 19.sp),
+                                modifier = Modifier.width(34.dp)
+                            )
                         }
-                        .padding(
-                            start = 8.dp,
-                            end = 14.dp,
-                            top = if (i == 0) 14.dp else 0.dp,
-                            bottom = if (i == lines.size - 1) 14.dp else 0.dp
+                        Text(
+                            text = if (lines[i].isEmpty()) " " else lines[i],
+                            color = PaperInk,
+                            style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 19.sp),
+                            modifier = Modifier.weight(1f)
                         )
-                ) {
-                    Text(
-                        text = (i + 1).toString(),
-                        color = GridLine,
-                        style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 19.sp),
-                        modifier = Modifier.width(34.dp)
-                    )
-                    Text(
-                        text = if (lines[i].isEmpty()) " " else lines[i],
-                        color = PaperInk,
-                        style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 19.sp),
-                        modifier = Modifier.weight(1f)
-                    )
+                    }
                 }
             }
         }
-        }
+        if (wordMode) SelectionContainer { list() } else list()
 
-        if (selected.isNotEmpty()) {
-            val barShape = RoundedCornerShape(26.dp)
-            Row(
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = pad.calculateBottomPadding() - 8.dp, start = 12.dp, end = 12.dp)
-                    .fillMaxWidth()
-                    .clip(barShape)
-                    .background(p.frost.copy(alpha = 1f))
-                    .border(1.dp, p.rim, barShape)
-                    .padding(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Pill("All", p, Modifier.weight(1f)) {
+        val barShape = RoundedCornerShape(26.dp)
+        Row(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = pad.calculateBottomPadding(), start = 12.dp, end = 12.dp)
+                .fillMaxWidth()
+                .clip(barShape)
+                .background(p.frost)
+                .border(1.dp, p.rim, barShape)
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Pill(if (wordMode) "Lines" else "Words", p, Modifier.weight(1.1f)) {
+                wordMode = !wordMode
+                selected = emptySet()
+                anchor = -1
+            }
+            if (wordMode) {
+                Text(
+                    text = "Long-press a word, drag the handles, then tap Copy",
+                    color = p.inkSoft,
+                    style = TextStyle(fontSize = 12.sp, lineHeight = 15.sp),
+                    modifier = Modifier.weight(2.6f).align(Alignment.CenterVertically).padding(horizontal = 6.dp)
+                )
+            } else {
+                Pill("All", p, Modifier.weight(0.8f)) {
                     selected = lines.indices.toSet()
                     anchor = -1
                 }
-                Pill("Clear", p, Modifier.weight(1f)) {
+                Pill("Clear", p, Modifier.weight(0.9f), enabled = selected.isNotEmpty()) {
                     selected = emptySet()
                     anchor = -1
                 }
-                Pill("Copy ${selected.size}", p, Modifier.weight(1.6f), tint = Sky) {
+                Pill("Copy ${selected.size}", p, Modifier.weight(1.4f), tint = Sky, enabled = selected.isNotEmpty()) {
                     val text = selected.sorted().joinToString("\n") { lines[it] }
                     if (text.length > 900_000) {
                         onCopied("Too much to copy at once (limit about 1 MB)")
@@ -162,6 +188,12 @@ internal fun TextViewer(
 
 @Composable
 internal fun WordViewer(blocks: List<DocBlock>, pad: PaddingValues) {
+    if (blocks.isEmpty()) {
+        Box(Modifier.fillMaxSize().padding(pad), contentAlignment = Alignment.Center) {
+            Text("No readable text found in this document", color = PaperInk.copy(alpha = 0.7f), fontSize = 14.sp)
+        }
+        return
+    }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
         items(blocks.size) { i ->
             Box(
@@ -207,7 +239,7 @@ private fun ParaView(b: DocPara) {
                 fontStyle = if (r.italic) FontStyle.Italic else null,
                 textDecoration = if (r.underline) TextDecoration.Underline else null
             )
-            withStyle(style) { append(r.text) }
+            withStyle(style) { append(r.text.replace("\t", "    ")) }
         }
     }
     Text(
@@ -238,7 +270,7 @@ private fun TableView(t: DocTable) {
                             .padding(6.dp)
                     ) {
                         Text(
-                            text = row.getOrElse(c) { "" },
+                            text = row.getOrElse(c) { "" }.replace("\t", "    "),
                             color = PaperInk,
                             style = TextStyle(fontFamily = Jakarta, fontSize = 13.sp)
                         )
