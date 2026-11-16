@@ -221,7 +221,7 @@ private class PdfPages(
     private val widthPx: Int
 ) {
     val count: Int = renderer.pageCount
-    private val cache = LruCache<Int, Bitmap>(6)
+    private val cache = LruCache<Int, Bitmap>(3)
     private var closed = false
 
     fun render(i: Int): Bitmap? = synchronized(this) {
@@ -230,14 +230,26 @@ private class PdfPages(
         if (hit != null) return@synchronized hit
         try {
             renderer.openPage(i).use { page ->
-                val h = (widthPx.toFloat() * page.height / page.width).toInt().coerceAtLeast(1)
-                val b = Bitmap.createBitmap(widthPx, h, Bitmap.Config.ARGB_8888)
-                b.eraseColor(android.graphics.Color.WHITE)
-                page.render(b, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                // 2x the screen width so zoomed-in pages stay sharp; plain width if memory runs short
+                fun draw(w: Int): Bitmap {
+                    val h = (w.toFloat() * page.height / page.width).toInt().coerceAtLeast(1)
+                    val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    b.eraseColor(android.graphics.Color.WHITE)
+                    page.render(b, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    return b
+                }
+                val b = try {
+                    draw(widthPx * 2)
+                } catch (_: OutOfMemoryError) {
+                    cache.evictAll()
+                    draw(widthPx)
+                }
                 cache.put(i, b)
                 b
             }
         } catch (_: Exception) {
+            null
+        } catch (_: OutOfMemoryError) {
             null
         }
     }
@@ -315,11 +327,7 @@ class MainActivity : ComponentActivity() {
             if (phase == Phase.Ready) {
                 when (kind) {
                     Kind.Pdf -> if (doc != null) {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = contentPad,
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
+                        ZoomableColumn(doc, contentPad, 10.dp) {
                             items(doc.count) { i -> PageView(doc, i) }
                         }
                     }
