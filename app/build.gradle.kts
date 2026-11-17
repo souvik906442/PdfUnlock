@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.pdfunlock"
         minSdk = 24
         targetSdk = 35
-        versionCode = 8
-        versionName = "2.6"
+        versionCode = 9
+        versionName = "2.7"
     }
 
     buildTypes {

@@ -297,6 +297,13 @@ class MainActivity : ComponentActivity() {
             if (uri != null) saveTo(uri)
         }
 
+    // After editing, the saved copy is opened here
+    private val editLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+            val u = r.data?.data
+            if (r.resultCode == RESULT_OK && u != null) openPdf(u)
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -392,8 +399,8 @@ class MainActivity : ComponentActivity() {
                         Phase.Ready -> when (kind) {
                             Kind.Pdf -> "Unlocked · ${pages?.count ?: 0} pages"
                             Kind.Text -> "Text · ${textLines?.size ?: 0} lines · tap a line, or Words for exact text"
-                            Kind.Word -> "Word document"
-                            Kind.Sheet -> "Excel · ${sheets?.size ?: 0} sheet(s) · tap a cell to copy, long-press for the row"
+                            Kind.Word -> "Word document · tap Edit to change the text"
+                            Kind.Sheet -> "Excel · ${sheets?.size ?: 0} sheet(s) · tap a cell to copy, long-press for the row · Edit to change values"
                             Kind.Slides -> "PowerPoint · $slideCount slides · text only"
                             else -> ""
                         }
@@ -427,6 +434,9 @@ class MainActivity : ComponentActivity() {
                         ) {
                             saveLauncher.launch((docName ?: "document.pdf").substringBeforeLast('.') + "_unlocked.pdf")
                         }
+                    }
+                    if (kind == Kind.Word || kind == Kind.Sheet) {
+                        Pill("Edit", p, Modifier.weight(1f), tint = Sky, enabled = phase == Phase.Ready) { startEdit() }
                     }
                     Pill("Share", p, Modifier.weight(1f), enabled = phase == Phase.Ready) { shareFile() }
                 }
@@ -720,6 +730,35 @@ class MainActivity : ComponentActivity() {
         message = "Saved passwords removed"
     }
 
+    /** Opens the editor for .docx / .xlsx. The file is copied to cache first, so any source (Drive, Downloads...) works. */
+    private fun startEdit() {
+        val uri = sourceUri ?: return
+        val name = docName ?: return
+        val ext = name.substringAfterLast('.', "").lowercase()
+        if (ext != "docx" && ext != "xlsx") {
+            message = "Only .docx and .xlsx files can be edited"
+            return
+        }
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val f = File(cacheDir, "edit_src.$ext")
+                    contentResolver.openInputStream(uri)!!.use { input ->
+                        f.outputStream().use { input.copyTo(it) }
+                    }
+                    f
+                }
+            }
+            result.onSuccess { f ->
+                editLauncher.launch(
+                    Intent(this@MainActivity, EditActivity::class.java)
+                        .putExtra("path", f.absolutePath)
+                        .putExtra("name", name)
+                )
+            }.onFailure { message = "Couldn’t open for editing: ${it.message}" }
+        }
+    }
+
     /** Sends the open file (the unlocked copy for a PDF) to any app: WhatsApp, Gmail, Drive, Bluetooth... */
     private fun shareFile() {
         lifecycleScope.launch {
@@ -809,6 +848,7 @@ class MainActivity : ComponentActivity() {
         pages?.close()
         unlockedFile.delete()
         File(cacheDir, "share").listFiles()?.forEach { it.delete() }
+        cacheDir.listFiles()?.forEach { if (it.name.startsWith("edit_src")) it.delete() }
         super.onDestroy()
     }
 }
