@@ -4,6 +4,11 @@ import android.content.Context
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.interactive.digitalsignature.PDSignature
 import org.bouncycastle.asn1.ASN1ObjectIdentifier
+import org.bouncycastle.asn1.ASN1OctetString
+import org.bouncycastle.asn1.DERIA5String
+import org.bouncycastle.asn1.x509.AccessDescription
+import org.bouncycastle.asn1.x509.AuthorityInformationAccess
+import org.bouncycastle.asn1.x509.GeneralName
 import org.bouncycastle.asn1.cms.CMSAttributes
 import org.bouncycastle.asn1.cms.Time
 import org.bouncycastle.asn1.x500.style.BCStyle
@@ -14,9 +19,17 @@ import org.bouncycastle.cert.jcajce.JcaX509CertificateHolder
 import org.bouncycastle.cms.CMSProcessableByteArray
 import org.bouncycastle.cms.CMSSignedData
 import org.bouncycastle.cms.jcajce.JcaSimpleSignerInfoVerifierBuilder
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.security.KeyStore
+import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
+import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Locale
 
 enum class SigLevel { VALID, WARN, BAD }
 enum class CheckState { OK, WARN, BAD, INFO }
@@ -44,8 +57,12 @@ class SigReport(val level: SigLevel, val entries: List<SigEntry>, val rootsLoade
  *  - the signature maths verifies (file bytes match what was signed)
  *  - nothing was added after the (last) signature
  *  - the signer certificate was valid on the signing date
- *  - the certificate chain ends in a CCA India root certificate (assets/cca_roots)
- * Anything else is amber (could not fully trust) or red (altered / broken).
+ *  - the certificate chain ends in a trusted root: a CCA India root (assets/cca_roots, covers
+ *    Aadhaar, birth/death certificates, e-district, DigiLocker, GST, ration card... every Indian
+ *    licensed CA) or a public root in the Android system store (private companies, universities...)
+ * Missing intermediate certificates are downloaded from the certificate's own AIA link (needs internet)
+ * and cached. Red (BAD) is used ONLY when the signature maths fails (file really changed).
+ * Everything else that is not perfect is amber.
  */
 object SigVerify {
 
@@ -75,7 +92,7 @@ object SigVerify {
         val entries = real.map { s ->
             val end = s.byteRange[2] + s.byteRange[3]
             try {
-                checkOne(s, fileBytes, trust, end == lastEnd)
+                checkOne(ctx, s, fileBytes, trust, end == lastEnd)
             } catch (e: Exception) {
                 SigEntry(
                     signer = s.name ?: "Unknown signer",
@@ -83,8 +100,8 @@ object SigVerify {
                     signedAt = null,
                     reason = null,
                     location = null,
-                    level = SigLevel.BAD,
-                    checks = listOf(SigCheck(CheckState.BAD, "Could not read this signature: ${e.message ?: e.javaClass.simpleName}"))
+                    level = SigLevel.WARN,
+                    checks = listOf(SigCheck(CheckState.WARN, "Could not read this signature: ${e.message ?: e.javaClass.simpleName}"))
                 )
             }
         }
@@ -93,12 +110,12 @@ object SigVerify {
             entries.any { it.level == SigLevel.WARN } -> SigLevel.WARN
             else -> SigLevel.VALID
         }
-        return SigReport(level, entries, trust.anchors.size)
+        return SigReport(level, entries, trust.cca.size + trust.sys.size)
     }
 
     // ---------------- one signature ----------------
 
-    private fun checkOne(sig: PDSignature, file: ByteArray, trust: Trust, isLast: Boolean): SigEntry {
+    private fun checkOne(ctx: Context, sig: PDSignature, file: ByteArray, trust: Trust, isLast: Boolean): SigEntry {
         val checks = ArrayList<SigCheck>()
         var level = SigLevel.VALID
         fun warn() { if (level == SigLevel.VALID) level = SigLevel.WARN }
@@ -152,26 +169,32 @@ object SigVerify {
         if (signAt == null) signAt = sig.signDate?.time
         val at = signAt ?: Date()
 
-        val validAt = try { signerCert.checkValidity(at); true } catch (_: Exception) { false }
-        if (validAt) {
+        val nb = signerCert.notBefore.time
+        val na = signerCert.notAfter.time
+        val t = at.time
+        val df = SimpleDateFormat("dd MMM yyyy HH:mm", Locale.getDefault())
+        if (t in nb..na) {
             checks.add(SigCheck(CheckState.OK, "Signer certificate was valid on the signing date"))
+        } else if (t < nb && t >= nb - SKEW_MS) {
+            // signing server clock slightly behind the certificate start time: common, harmless
+            checks.add(SigCheck(CheckState.OK, "Signer certificate was valid on the signing date (within a day of its start time)"))
         } else {
-            checks.add(SigCheck(CheckState.BAD, "Signer certificate was expired or not yet valid on the signing date"))
-            bad()
+            checks.add(
+                SigCheck(
+                    CheckState.WARN,
+                    "Signer certificate was not valid on the signing date (valid ${df.format(Date(nb))} to ${df.format(Date(na))})"
+                )
+            )
+            warn()
         }
 
-        // 4. chain to a trusted CCA India root
-        if (trust.anchors.isEmpty()) {
-            checks.add(SigCheck(CheckState.WARN, "CCA India root certificates are not installed in the app, so trust could not be checked"))
-            warn()
+        // 4. chain to a trusted root
+        val res = buildChain(ctx, signerCert, embedded, trust, at)
+        if (res.trusted) {
+            checks.add(SigCheck(CheckState.OK, res.note))
         } else {
-            val res = buildChain(signerCert, embedded + trust.pool, trust.anchors, at)
-            if (res.trusted) {
-                checks.add(SigCheck(CheckState.OK, "Certificate chain ends at a CCA India root (Government of India)"))
-            } else {
-                checks.add(SigCheck(CheckState.WARN, res.note))
-                warn()
-            }
+            checks.add(SigCheck(CheckState.WARN, res.note))
+            warn()
         }
 
         checks.add(SigCheck(CheckState.INFO, "Revocation (CRL/OCSP) is not checked — it needs internet"))
@@ -189,47 +212,81 @@ object SigVerify {
 
     // ---------------- chain ----------------
 
+    private const val SKEW_MS = 24L * 60 * 60 * 1000
+
     private class ChainRes(val trusted: Boolean, val note: String)
 
+    private fun okAt(c: X509Certificate, at: Date): Boolean {
+        val t = at.time
+        return t <= c.notAfter.time && t >= c.notBefore.time - SKEW_MS
+    }
+
+    private fun isSelfSigned(c: X509Certificate): Boolean =
+        c.subjectX500Principal == c.issuerX500Principal
+
+    private fun findIssuer(cur: X509Certificate, from: List<X509Certificate>): X509Certificate? {
+        for (c in from) {
+            if (c == cur) continue
+            if (c.subjectX500Principal != cur.issuerX500Principal) continue
+            try {
+                cur.verify(c.publicKey)
+                return c
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
+
     private fun buildChain(
+        ctx: Context,
         leaf: X509Certificate,
-        pool: List<X509Certificate>,
-        anchors: List<X509Certificate>,
+        embedded: List<X509Certificate>,
+        trust: Trust,
         at: Date
     ): ChainRes {
+        val pool = ArrayList<X509Certificate>()
+        pool.addAll(embedded)
+        pool.addAll(trust.pool)
+        val anchors = trust.cca + trust.sys
+        var fetchFailed = false
         var cur = leaf
         for (depth in 0 until 8) {
-            if (anchors.any { it == cur }) {
-                return try {
-                    cur.checkValidity(at)
-                    ChainRes(true, "")
-                } catch (_: Exception) {
-                    ChainRes(false, "The CCA India root was not valid on the signing date")
+            val isCca = trust.cca.any { it == cur }
+            val isSys = !isCca && trust.sys.any { it == cur }
+            if (isCca || isSys) {
+                return if (okAt(cur, at)) {
+                    if (isCca) ChainRes(true, "Certificate chain ends at a CCA India root (Government of India)")
+                    else ChainRes(true, "Certificate chain ends at a publicly trusted root CA (not a Government of India CA)")
+                } else {
+                    ChainRes(false, "The root certificate was not valid on the signing date")
                 }
             }
-            val selfSigned = cur.subjectX500Principal == cur.issuerX500Principal
-            if (selfSigned) {
-                return ChainRes(false, "Chain ends at a root that is not a CCA India root")
+            if (isSelfSigned(cur)) {
+                return ChainRes(false, "Chain ends at a self-signed certificate that is not a trusted root")
             }
-            var next: X509Certificate? = null
-            for (c in anchors + pool) {
-                if (c == cur) continue
-                if (c.subjectX500Principal != cur.issuerX500Principal) continue
-                try {
-                    cur.verify(c.publicKey)
-                    next = c
-                    break
-                } catch (_: Exception) {}
+            var next = findIssuer(cur, anchors) ?: findIssuer(cur, pool)
+            if (next == null) {
+                // the PDF did not carry the issuer: download it from the certificate's own AIA link
+                val fetched = fetchIssuers(ctx, cur)
+                if (fetched.isEmpty()) fetchFailed = true
+                else {
+                    pool.addAll(fetched)
+                    next = findIssuer(cur, fetched)
+                }
             }
             if (next == null) {
-                return ChainRes(false, "Issuer certificate is missing from the PDF, so the chain to CCA India could not be completed")
+                return ChainRes(
+                    false,
+                    if (fetchFailed)
+                        "Issuer certificate is not in the PDF and could not be downloaded — connect to the internet and open the file again"
+                    else
+                        "Issuer certificate could not be found, so the chain to a trusted root could not be completed"
+                )
             }
             if (next.basicConstraints < 0) {
                 return ChainRes(false, "Issuer certificate is not a CA certificate")
             }
-            try {
-                next.checkValidity(at)
-            } catch (_: Exception) {
+            if (!okAt(next, at)) {
                 return ChainRes(false, "A CA certificate in the chain was not valid on the signing date")
             }
             cur = next
@@ -237,19 +294,108 @@ object SigVerify {
         return ChainRes(false, "Certificate chain is too long")
     }
 
+    // ---------------- AIA download (missing intermediate CA certificates) ----------------
+
+    private fun aiaUrls(c: X509Certificate): List<String> {
+        val out = ArrayList<String>()
+        try {
+            val ext = c.getExtensionValue("1.3.6.1.5.5.7.1.1") ?: return out
+            val aia = AuthorityInformationAccess.getInstance(ASN1OctetString.getInstance(ext).octets)
+            for (ad in aia.accessDescriptions) {
+                if (ad.accessMethod != AccessDescription.id_ad_caIssuers) continue
+                val loc = ad.accessLocation
+                if (loc.tagNo != GeneralName.uniformResourceIdentifier) continue
+                val u = DERIA5String.getInstance(loc.name).string
+                if (u.startsWith("http://", true) || u.startsWith("https://", true)) out.add(u)
+            }
+        } catch (_: Exception) {
+        }
+        return out
+    }
+
+    private fun parseCerts(data: ByteArray): List<X509Certificate> {
+        return try {
+            CertificateFactory.getInstance("X.509")
+                .generateCertificates(ByteArrayInputStream(data))
+                .filterIsInstance<X509Certificate>()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun download(url: String): ByteArray? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = URL(url).openConnection() as HttpURLConnection
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+            conn.instanceFollowRedirects = true
+            if (conn.responseCode != 200) return null
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(8192)
+            conn.inputStream.use { ins ->
+                while (true) {
+                    val n = ins.read(buf)
+                    if (n <= 0) break
+                    out.write(buf, 0, n)
+                    if (out.size() > 512 * 1024) return null
+                }
+            }
+            out.toByteArray()
+        } catch (_: Exception) {
+            null
+        } finally {
+            try { conn?.disconnect() } catch (_: Exception) {}
+        }
+    }
+
+    private fun sha256Hex(s: String): String {
+        val d = MessageDigest.getInstance("SHA-256").digest(s.toByteArray())
+        return d.joinToString("") { "%02x".format(it) }
+    }
+
+    /** Certificates are checked by their own signature afterwards, so a bad download can never make a file look valid. */
+    private fun fetchIssuers(ctx: Context, c: X509Certificate): List<X509Certificate> {
+        val out = ArrayList<X509Certificate>()
+        val dir = File(ctx.filesDir, "ca_cache")
+        try { dir.mkdirs() } catch (_: Exception) {}
+        for (u in aiaUrls(c).take(3)) {
+            val f = File(dir, sha256Hex(u) + ".bin")
+            var data: ByteArray? = try { if (f.exists() && f.length() > 0) f.readBytes() else null } catch (_: Exception) { null }
+            if (data == null) {
+                data = download(u) ?: continue
+                if (parseCerts(data).isEmpty()) continue
+                try { f.writeBytes(data) } catch (_: Exception) {}
+            }
+            out.addAll(parseCerts(data))
+        }
+        return out
+    }
+
     // ---------------- trust store ----------------
 
-    private class Trust(val anchors: List<X509Certificate>, val pool: List<X509Certificate>)
+    private class Trust(
+        val cca: List<X509Certificate>,
+        val sys: List<X509Certificate>,
+        val pool: List<X509Certificate>
+    )
 
-    /** Reads every certificate in assets/cca_roots (DER or PEM). Self-signed ones are trust anchors, the rest help build chains. */
+    private fun isRoot(c: X509Certificate): Boolean =
+        isSelfSigned(c) && try { c.verify(c.publicKey); true } catch (_: Exception) { false }
+
+    /**
+     * cca  = self-signed roots in assets/cca_roots (Government of India)
+     * sys  = roots of the Android system store (public / commercial CAs)
+     * pool = non-root certificates (intermediates) from assets and from earlier AIA downloads
+     */
     private fun loadTrust(ctx: Context): Trust {
         val all = ArrayList<X509Certificate>()
+        val cf = CertificateFactory.getInstance("X.509")
         val names: Array<String> = try {
             ctx.assets.list("cca_roots") ?: emptyArray()
         } catch (_: Exception) {
             emptyArray()
         }
-        val cf = CertificateFactory.getInstance("X.509")
         for (n in names) {
             try {
                 ctx.assets.open("cca_roots/$n").use { s ->
@@ -259,13 +405,33 @@ object SigVerify {
                 // not a certificate — ignore
             }
         }
-        val anchors = ArrayList<X509Certificate>()
+        val cca = ArrayList<X509Certificate>()
         val pool = ArrayList<X509Certificate>()
-        for (c in all) {
-            val self = c.subjectX500Principal == c.issuerX500Principal && try { c.verify(c.publicKey); true } catch (_: Exception) { false }
-            if (self) anchors.add(c) else pool.add(c)
+        for (c in all) if (isRoot(c)) cca.add(c) else pool.add(c)
+
+        try {
+            val dir = File(ctx.filesDir, "ca_cache")
+            dir.listFiles()?.forEach { f ->
+                try {
+                    for (c in parseCerts(f.readBytes())) if (!isRoot(c)) pool.add(c)
+                } catch (_: Exception) {
+                }
+            }
+        } catch (_: Exception) {
         }
-        return Trust(anchors, pool)
+
+        val sys = ArrayList<X509Certificate>()
+        try {
+            val ks = KeyStore.getInstance("AndroidCAStore")
+            ks.load(null, null)
+            val en = ks.aliases()
+            while (en.hasMoreElements()) {
+                val c = ks.getCertificate(en.nextElement())
+                if (c is X509Certificate) sys.add(c)
+            }
+        } catch (_: Exception) {
+        }
+        return Trust(cca, sys, pool)
     }
 
     // ---------------- names ----------------
