@@ -779,7 +779,7 @@ class MainActivity : ComponentActivity() {
                     contentResolver.openInputStream(uri)!!.use { input ->
                         PDDocument.load(input, password).use { doc ->
                             doc.setAllSecurityToBeRemoved(true)
-                            SigMark.removeUnknown(doc)
+                            SigMark.removeStamp(doc)
                             doc.save(unlockedFile)
                         }
                     }
