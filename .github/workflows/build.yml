@@ -16,6 +16,32 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
+
+      - name: Fetch CCA India root certificates
+        run: |
+          d=app/src/main/assets/cca_roots
+          mkdir -p "$d"
+          base=https://cca.gov.in/cca/sites/default/files/files
+          for f in CCAIndia2022 CCAIndia2022SPL CCAIndia2015 CCAIndia2014; do
+            if [ ! -s "$d/$f.cer" ]; then
+              curl -fsSL --retry 3 --max-time 60 -o "$d/$f.cer" "$base/$f.cer" \
+                || echo "::warning::could not download $f.cer (add it to $d manually)"
+            fi
+            if [ -s "$d/$f.cer" ]; then
+              if ! openssl x509 -inform DER -in "$d/$f.cer" -noout 2>/dev/null \
+                 && ! openssl x509 -inform PEM -in "$d/$f.cer" -noout 2>/dev/null; then
+                echo "::warning::$f.cer is not a valid certificate, removing"
+                rm -f "$d/$f.cer"
+              fi
+            fi
+          done
+          for f in "$d"/*.cer; do
+            [ -s "$f" ] || continue
+            echo "== $f"
+            (openssl x509 -inform DER -in "$f" -noout -subject -dates -fingerprint -sha256 \
+              || openssl x509 -inform PEM -in "$f" -noout -subject -dates -fingerprint -sha256) 2>/dev/null
+          done
+
       - name: Build debug APK
         run: gradle assembleDebug
       - uses: actions/upload-artifact@v4

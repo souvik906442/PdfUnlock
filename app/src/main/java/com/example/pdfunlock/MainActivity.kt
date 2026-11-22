@@ -40,10 +40,14 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -104,6 +108,8 @@ import java.security.MessageDigest
 
 internal val Sky = Color(0xFF0A84FF)       // Candy.Sky: the primary action
 private val Tomato = Color(0xFFFF5B4F)    // Candy.Tomato: errors
+private val SigGreen = Color(0xFF2FBF71)
+private val SigAmber = Color(0xFFF5A623)
 private val InkLight = Color(0xFF172033)
 private val InkDark = Color(0xFFEEF1FF)
 
@@ -286,6 +292,8 @@ class MainActivity : ComponentActivity() {
     private var slideCount by mutableStateOf(0)
     private var hasSaved by mutableStateOf(false)
     private var message by mutableStateOf<String?>(null)
+    private var sigReport by mutableStateOf<SigReport?>(null)
+    private var showSig by mutableStateOf(false)
 
     private val openLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -394,7 +402,18 @@ class MainActivity : ComponentActivity() {
                         .border(1.dp, p.rim, RoundedCornerShape(26.dp))
                         .padding(horizontal = 18.dp, vertical = 12.dp)
                 ) {
-                    Text(docName ?: "PDF", p.ink, Title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            docName ?: "PDF", p.ink, Title,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                        val rep = sigReport
+                        if (rep != null && phase == Phase.Ready && kind == Kind.Pdf) {
+                            Spacer(Modifier.width(10.dp))
+                            SigBadge(rep.level) { showSig = true }
+                        }
+                    }
                     val sub = when (phase) {
                         Phase.Ready -> when (kind) {
                             Kind.Pdf -> "Unlocked · ${pages?.count ?: 0} pages"
@@ -466,6 +485,94 @@ class MainActivity : ComponentActivity() {
                     onCancel = { askPassword = false; phase = Phase.Locked },
                     onUnlock = { pw -> askPassword = false; tryUnlock(pw, fromUser = true) }
                 )
+            }
+
+            val rep = sigReport
+            if (showSig && rep != null) {
+                SigDialog(p, rep) { showSig = false }
+            }
+        }
+    }
+
+    @Composable
+    private fun SigBadge(level: SigLevel, onClick: () -> Unit) {
+        val (color, label) = when (level) {
+            SigLevel.VALID -> SigGreen to "✓ Verified"
+            SigLevel.WARN -> SigAmber to "! Check"
+            SigLevel.BAD -> Tomato to "✕ Altered"
+        }
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(50))
+                .background(color)
+                .clickable { onClick() }
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        ) {
+            Text(label, Color.White, Caption.copy(fontWeight = FontWeight.Bold), maxLines = 1)
+        }
+    }
+
+    @Composable
+    private fun SigDialog(p: Palette, rep: SigReport, onClose: () -> Unit) {
+        val shape = RoundedCornerShape(30.dp)
+        val fmt = remember { java.text.SimpleDateFormat("dd MMM yyyy, HH:mm", java.util.Locale.getDefault()) }
+        Dialog(
+            onDismissRequest = onClose,
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Column(
+                Modifier
+                    .padding(24.dp)
+                    .fillMaxWidth()
+                    .clip(shape)
+                    .background(p.frost.copy(alpha = 0.97f))
+                    .border(1.dp, p.rim, shape)
+                    .padding(22.dp)
+            ) {
+                val (head, headColor) = when (rep.level) {
+                    SigLevel.VALID -> "Signature verified" to SigGreen
+                    SigLevel.WARN -> "Signature found — not fully trusted" to SigAmber
+                    SigLevel.BAD -> "Signature is broken or file was altered" to Tomato
+                }
+                Text("Digital signature", p.ink, Title)
+                Spacer(Modifier.height(4.dp))
+                Text(head, headColor, BodyStrong)
+                Spacer(Modifier.height(14.dp))
+
+                Column(
+                    Modifier
+                        .heightIn(max = 460.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    rep.entries.forEachIndexed { i, e ->
+                        if (i > 0) Spacer(Modifier.height(16.dp))
+                        Text(e.signer, p.ink, BodyStrong)
+                        if (e.issuer.isNotEmpty()) Text("Issued by ${e.issuer}", p.inkSoft, Caption)
+                        e.signedAt?.let { Text("Signed ${fmt.format(it)}", p.inkSoft, Caption) }
+                        if (!e.reason.isNullOrBlank()) Text("Reason: ${e.reason}", p.inkSoft, Caption)
+                        if (!e.location.isNullOrBlank()) Text("Location: ${e.location}", p.inkSoft, Caption)
+                        Spacer(Modifier.height(8.dp))
+                        e.checks.forEach { c ->
+                            val (mark, col) = when (c.state) {
+                                CheckState.OK -> "✓" to SigGreen
+                                CheckState.WARN -> "!" to SigAmber
+                                CheckState.BAD -> "✕" to Tomato
+                                CheckState.INFO -> "•" to p.inkSoft
+                            }
+                            Row(Modifier.padding(vertical = 3.dp)) {
+                                Text(mark, col, BodyStrong, modifier = Modifier.width(22.dp))
+                                Text(c.text, p.ink, Body, modifier = Modifier.weight(1f))
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        "This check runs on the original file. A copy saved with “Save unlocked” is re-written, so it will not carry the signature.",
+                        p.inkSoft, Caption
+                    )
+                }
+                Spacer(Modifier.height(18.dp))
+                Pill("Close", p, Modifier.fillMaxWidth(), tint = Sky) { onClose() }
             }
         }
     }
@@ -594,6 +701,8 @@ class MainActivity : ComponentActivity() {
         docName = queryName(uri) ?: "document.pdf"
         pages?.close()
         pages = null
+        sigReport = null
+        showSig = false
         askPassword = false
         phase = Phase.Loading
         kind = detectKind(contentResolver, uri, docName)
@@ -689,6 +798,7 @@ class MainActivity : ComponentActivity() {
                         hasSaved = true
                     }
                     showPages()
+                    verifySignatures(uri, password)
                 }
                 Outcome.WRONG -> {
                     if (!fromUser) {
@@ -708,6 +818,19 @@ class MainActivity : ComponentActivity() {
                     message = "Error: ${lastError ?: "unknown"}"
                 }
             }
+        }
+    }
+
+    /** Checks the digital signature(s) on the ORIGINAL file (the unlocked copy is re-written and loses them). */
+    private fun verifySignatures(uri: Uri, password: String) {
+        lifecycleScope.launch {
+            val report = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bytes = contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+                    SigVerify.verify(this@MainActivity, bytes, password)
+                }.getOrNull()
+            }
+            if (sourceUri == uri) sigReport = report
         }
     }
 
